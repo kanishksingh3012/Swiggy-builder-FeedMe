@@ -77,4 +77,17 @@ async def discover(
     min_protein: float | None = None,
 ) -> list[MenuItem]:
     items = await search_menu(client, query, address_id=address_id)
+
+    # search_menu items never carry eta_minutes — real per-item ETA
+    # doesn't exist there (confirmed live). Restaurant-level ETA does
+    # exist via search_restaurants (deliveryTimeMinutes), so enrich items
+    # with their restaurant's ETA by matching restaurant_id. Best-effort:
+    # items whose restaurant doesn't show up in this second search (a
+    # different result set) just keep eta_minutes=None.
+    restaurants = await search_restaurants(client, query, address_id=address_id)
+    eta_by_restaurant = {r.restaurant_id: r.eta_minutes for r in restaurants if r.eta_minutes}
+    for item in items:
+        if item.eta_minutes is None and item.restaurant_id in eta_by_restaurant:
+            item.eta_minutes = eta_by_restaurant[item.restaurant_id]
+
     return filter_items(items, max_price=max_price, fastest=fastest, min_protein=min_protein)

@@ -39,12 +39,16 @@ def _select_item(items: list[MenuItem]) -> MenuItem | None:
     table = Table(title="Results — pick one")
     table.add_column("#")
     table.add_column("Item")
+    table.add_column("Restaurant")
+    table.add_column("Rating")
     table.add_column("Price")
     table.add_column("ETA (min)")
     for idx, item in enumerate(items, start=1):
         table.add_row(
             str(idx),
             item.name or item.item_id,
+            item.restaurant_name or "-",
+            str(item.rating) if item.rating is not None else "-",
             str(item.price) if item.price is not None else "-",
             str(item.eta_minutes) if item.eta_minutes is not None else "-",
         )
