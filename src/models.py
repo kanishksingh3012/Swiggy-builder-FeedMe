@@ -140,11 +140,20 @@ class Coupon(BaseModel):
 
 
 class PaymentOption(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    """Verified live against get_payment_options on 2026-08-21 (real
+    cart, stopped short of place_food_order). Real entries in
+    `allMethods` look like {"id": "gpay://upi/", "groupName": "UPI",
+    "displayName": "Google Pay", "enabled": true, ...} — nothing like
+    the guessed method_id/method_type/display_name shape. On this
+    account there was no Swiggy Money entry at all; only UPI intents
+    (mobile app handoff), a desktop QR option, and COD."""
 
-    method_id: str
-    display_name: str | None = None
-    method_type: str | None = None  # unverified values, e.g. "swiggy_money" | "cod" | "upi"
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    method_id: str = Field(alias="id")
+    display_name: str | None = Field(default=None, alias="displayName")
+    method_type: str | None = Field(default=None, alias="groupName")
+    enabled: bool | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

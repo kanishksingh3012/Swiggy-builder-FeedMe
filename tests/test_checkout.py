@@ -34,6 +34,28 @@ def test_is_zero_phone_rejects_upi_qr():
     assert not _is_zero_phone(_opt(method_type=None, display_name="Scan & Pay"))
 
 
+def test_payment_option_parses_real_shape_and_filters_correctly():
+    # Confirmed live 2026-08-21: real get_payment_options entries use
+    # id/groupName/displayName, not method_id/method_type/display_name —
+    # the model previously required "method_id" and crashed with a
+    # pydantic ValidationError on every real entry. This locks the fix
+    # in against the exact real shapes seen (no Swiggy Money existed on
+    # the test account; only UPI intents, a desktop QR option, and COD).
+    gpay = PaymentOption.model_validate(
+        {"id": "gpay://upi/", "groupName": "UPI", "displayName": "Google Pay", "enabled": True}
+    )
+    qr = PaymentOption.model_validate(
+        {"id": "PayWithQR", "groupName": "UPI", "displayName": "Pay with QR"}
+    )
+    cod = PaymentOption.model_validate(
+        {"id": "COD", "groupName": "COD", "displayName": "Pay on delivery"}
+    )
+
+    assert not _is_zero_phone(gpay)
+    assert not _is_zero_phone(qr)
+    assert _is_zero_phone(cod)
+
+
 async def test_get_zero_phone_payment_options_filters_mixed(monkeypatch):
     from feedme import checkout
 
