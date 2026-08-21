@@ -11,7 +11,7 @@ from rich.table import Table
 
 from feedme import auth, cart, checkout, search, tracking
 from feedme.mcp_client import MCPClient
-from models import MenuItem, PaymentOption
+from models import Address, MenuItem, PaymentOption
 
 # `main` is registered via @app.command() (not @app.callback()): a Typer
 # app whose only entrypoint is a single @app.command() collapses to a
@@ -138,20 +138,79 @@ def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None
     return options[choice - 1]
 
 
+def _address_priority(address: Address) -> int:
+    """Confirmed live (2026-08-21) that addressCategory=="Home" is not
+    unique — an account had 3 addresses categorized "Home" — so category
+    alone can't safely auto-pick. The specific address tagged exactly
+    "Home" (not just categorized Home) is the actual signal; everything
+    else falls back to Home-category, then the rest, in original order
+    within each group (sort is stable)."""
+    tag = (address.address_tag or "").strip().lower()
+    if tag == "home":
+        return 0
+    if (address.address_category or "").strip().lower() == "home":
+        return 1
+    return 2
+
+
+def _select_address(addresses: list[Address]) -> Address | None:
+    """Confirm-before-acting, same principle as _select_item — an
+    address mistake means delivering to the wrong city, a real live
+    failure mode caught in testing (default was addresses[0], which
+    turned out to be a stale saved address in a different city entirely
+    from where the account's actual "Home" address is). Shows only the
+    top 3 (sorted by _address_priority) rather than the full list —
+    the sort already does the real work of surfacing the likely match
+    first; this is just a final human check, not another full picker."""
+    top = sorted(addresses, key=_address_priority)[:3]
+    table = Table(title="Delivery address — confirm or pick")
+    table.add_column("#")
+    table.add_column("Tag")
+    table.add_column("Category")
+    table.add_column("Address")
+    for idx, addr in enumerate(top, start=1):
+        table.add_row(
+            str(idx),
+            addr.address_tag or "-",
+            addr.address_category or "-",
+            (addr.address_line or "")[:60],
+        )
+    console.print(table)
+
+    raw = typer.prompt(f"Deliver to [1-{len(top)}] (or 'q' to cancel)", default="1")
+    if raw.strip().lower() in ("q", ""):
+        return None
+    try:
+        choice = int(raw)
+    except ValueError:
+        console.print("[red]Not a number — cancelling.[/]")
+        return None
+    if not (1 <= choice <= len(top)):
+        console.print(f"[red]{choice} is out of range — cancelling.[/]")
+        return None
+    return top[choice - 1]
+
+
 async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> None:
     await _ensure_authenticated()
 
     async with MCPClient("food") as client:
         # Carts/orders are addressed by addressId, not a separate cart_id
-        # (confirmed live — see cart.py). The delivery address is still
-        # autopicked (the account's first saved address) — that part was
-        # explicitly fine to keep simple. The menu item is not: nothing
-        # goes into the cart without an explicit pick below.
+        # (confirmed live — see cart.py). Address selection used to be
+        # addresses[0] with no confirmation — a real live check showed
+        # that's not safe (the first result was a stale address in a
+        # different city than the account's actual "Home"). Now sorted
+        # to put the likely match first and confirmed explicitly, same
+        # principle as the item/payment pickers.
         addresses = await search.get_addresses(client)
         if not addresses:
             console.print("[yellow]No saved addresses on this account.[/]")
             return
-        address_id = addresses[0].id
+        address = _select_address(addresses)
+        if address is None:
+            console.print("[yellow]Cancelled — no delivery address confirmed.[/]")
+            return
+        address_id = address.id
 
         items, has_more, next_offset = await search.discover(
             client, query, address_id=address_id, max_price=max_price, fastest=fastest

@@ -93,15 +93,16 @@ def test_cli_no_query_is_usage_error():
 
 def test_cli_runs_full_pipeline_after_confirming_item(monkeypatch):
     _patch_pipeline(monkeypatch)
-    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n")
+    # "1\n" confirms the address, "1\n" picks the item
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n")
     assert result.exit_code == 0
     assert "Chicken Bowl" in result.stdout
 
 
 def test_cli_prompts_for_payment_method_when_multiple_available(monkeypatch):
     _patch_pipeline(monkeypatch, payment_option_count=2)
-    # "1\n" picks the item, "2\n" picks the second payment method (COD)
-    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n2\n")
+    # "1\n" confirms the address, "1\n" picks the item, "2\n" picks the second payment method
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n2\n")
     assert result.exit_code == 0
     assert "payment" in result.stdout.lower()
 
@@ -114,7 +115,7 @@ def test_cli_cancelling_payment_selection_does_not_place_order(monkeypatch):
 
     monkeypatch.setattr(checkout, "checkout", fail_if_called)
 
-    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\nq\n")
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\nq\n")
     assert result.exit_code == 0
     assert "not placed" in result.stdout.lower()
 
@@ -127,13 +128,27 @@ def test_cli_cancelling_selection_adds_nothing_to_cart(monkeypatch):
 
     monkeypatch.setattr(cart, "flush_cart", fail_if_called)
 
-    result = runner.invoke(cli.app, ["chicken bowl"], input="q\n")
+    # "1\n" confirms the address, "q\n" cancels the item pick
+    result = runner.invoke(cli.app, ["chicken bowl"], input="1\nq\n")
     assert result.exit_code == 0
     assert "cancelled" in result.stdout.lower()
 
 
+def test_cli_cancelling_address_confirmation_stops_before_anything_else(monkeypatch):
+    _patch_pipeline(monkeypatch)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("search.discover should not run when address confirm is cancelled")
+
+    monkeypatch.setattr(search, "discover", fail_if_called)
+
+    result = runner.invoke(cli.app, ["chicken bowl"], input="q\n")
+    assert result.exit_code == 0
+    assert "no delivery address confirmed" in result.stdout.lower()
+
+
 def test_cli_exits_nonzero_when_no_usable_payment_options(monkeypatch):
     _patch_pipeline(monkeypatch, zero_phone_available=False)
-    result = runner.invoke(cli.app, ["chicken bowl"], input="1\n")
+    result = runner.invoke(cli.app, ["chicken bowl"], input="1\n1\n")
     assert result.exit_code == 1
     assert "no usable options" in result.stdout.lower()
