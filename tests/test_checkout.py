@@ -3,8 +3,11 @@ from __future__ import annotations
 import pytest
 
 from feedme.checkout import (
+    NoUsablePaymentOptions,
     ZeroPhonePaymentUnavailable,
+    _is_qr,
     _is_zero_phone,
+    find_qr_payload,
 )
 from models import PaymentOption
 
@@ -86,6 +89,64 @@ async def test_get_zero_phone_payment_options_raises_when_only_upi(monkeypatch):
 
     with pytest.raises(ZeroPhonePaymentUnavailable):
         await checkout.get_zero_phone_payment_options(client=None)
+
+
+def test_is_qr_recognizes_real_paywithqr_id():
+    qr = PaymentOption.model_validate(
+        {"id": "PayWithQR", "groupName": "UPI", "displayName": "Pay with QR"}
+    )
+    assert _is_qr(qr)
+
+
+def test_is_qr_rejects_upi_app_intents_and_cod():
+    gpay = PaymentOption.model_validate(
+        {"id": "gpay://upi/", "groupName": "UPI", "displayName": "Google Pay"}
+    )
+    cod = PaymentOption.model_validate({"id": "COD", "groupName": "COD", "displayName": "COD"})
+    assert not _is_qr(gpay)
+    assert not _is_qr(cod)
+
+
+async def test_get_available_payment_options_includes_qr_alongside_zero_phone(monkeypatch):
+    from feedme import checkout
+
+    options = [
+        _opt(method_type="upi", method_id="gpay://upi/"),
+        _opt(method_type="upi", method_id="PayWithQR"),
+        _opt(method_type="cod", method_id="COD"),
+    ]
+
+    async def fake_get_payment_options(client):
+        return options
+
+    monkeypatch.setattr(checkout, "get_payment_options", fake_get_payment_options)
+
+    result = await checkout.get_available_payment_options(client=None)
+    assert {o.method_id for o in result} == {"PayWithQR", "COD"}
+
+
+async def test_get_available_payment_options_raises_when_only_app_intents(monkeypatch):
+    from feedme import checkout
+
+    options = [_opt(method_type="upi", method_id="gpay://upi/")]
+
+    async def fake_get_payment_options(client):
+        return options
+
+    monkeypatch.setattr(checkout, "get_payment_options", fake_get_payment_options)
+
+    with pytest.raises(NoUsablePaymentOptions):
+        await checkout.get_available_payment_options(client=None)
+
+
+def test_find_qr_payload_checks_known_keys():
+    assert find_qr_payload({"qrCodeUrl": "upi://pay?pa=x"}) == "upi://pay?pa=x"
+    assert find_qr_payload({"unrelated": "value"}) is None
+
+
+def test_find_qr_payload_searches_nested_dicts():
+    data = {"data": {"payment": {"paymentLink": "upi://pay?pa=y"}}}
+    assert find_qr_payload(data) == "upi://pay?pa=y"
 
 
 async def test_get_zero_phone_payment_options_raises_when_empty(monkeypatch):

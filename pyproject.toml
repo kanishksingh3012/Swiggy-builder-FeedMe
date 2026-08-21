@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "feedme"
 version = "0.1.0"
-description = "Zero-phone food/grocery ordering dev CLI for Swiggy MCP servers"
+description = "Low-friction food ordering dev CLI for Swiggy MCP servers (zero-phone by default, QR is an opt-in exception)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "rich>=13.7",
     "httpx>=0.27",
     "pydantic>=2.7",
+    "qrcode>=7.4",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +23,7 @@ dev = [
     "respx>=0.21",
     "ruff>=0.5",
     "mypy>=1.10",
+    "types-qrcode>=7.4",
 ]
 
 [project.scripts]

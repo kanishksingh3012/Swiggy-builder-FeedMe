@@ -101,20 +101,27 @@ async def _select_item(
 
 def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None:
     """Same confirm-before-acting principle as _select_item, applied to
-    payment method. If there's only one zero-phone option (the only case
-    seen live so far — COD, no Swiggy Money on the test account), there's
-    no actual decision to make, so it's used without prompting rather
-    than adding a confirmation with nothing to confirm. A real choice
-    between options (e.g. once Swiggy Money is also available) still
-    gets the same explicit-pick treatment as menu items."""
+    payment method. If there's only one usable option (COD, the common
+    case — no Swiggy Money on the test account), there's no actual
+    decision to make, so it's used without prompting rather than adding
+    a confirmation with nothing to confirm. A real choice between
+    options gets the same explicit-pick treatment as menu items.
+
+    The option set here is checkout.get_available_payment_options() —
+    zero-phone options (COD/Swiggy Money) plus QR, never full mobile-app
+    UPI handoffs. QR is a deliberate, explicit exception to "zero-phone"
+    (see checkout.py's module docstring), so it's always labeled as such
+    here rather than blended in indistinguishably."""
     if len(options) == 1:
         return options[0]
 
-    table = Table(title="Zero-phone payment options — pick one")
+    table = Table(title="Payment options — pick one")
     table.add_column("#")
     table.add_column("Method")
+    table.add_column("Type")
     for idx, option in enumerate(options, start=1):
-        table.add_row(str(idx), option.display_name or option.method_id)
+        kind = "QR (scan required)" if checkout._is_qr(option) else "Zero-phone"
+        table.add_row(str(idx), option.display_name or option.method_id, kind)
     console.print(table)
 
     raw = typer.prompt(f"Pick a payment method [1-{len(options)}] (or 'q' to cancel)", default="q")
@@ -177,8 +184,8 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             current_cart = await cart.apply_best_coupon(client, current_cart, chosen.restaurant_id)
 
         try:
-            payment_options = await checkout.get_zero_phone_payment_options(client)
-        except checkout.ZeroPhonePaymentUnavailable as exc:
+            payment_options = await checkout.get_available_payment_options(client)
+        except checkout.NoUsablePaymentOptions as exc:
             console.print(f"[red]{exc}[/]")
             raise typer.Exit(code=1) from exc
 

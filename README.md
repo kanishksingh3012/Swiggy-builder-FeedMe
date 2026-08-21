@@ -1,8 +1,13 @@
 # feedme
 
-Zero-phone food ordering from the terminal, via Swiggy's MCP servers. Search,
-cart, coupon-optimize, and check out without touching your phone — no
-QR-scan or UPI-PIN mobile handoff, ever.
+Low-friction food ordering from the terminal, via Swiggy's MCP servers.
+Search, cart, coupon-optimize, and check out without a full mobile-app UPI
+handoff — that's the non-negotiable part. QR is a deliberate, narrow
+exception: it's offered as an explicit opt-in alongside COD/Swiggy Money
+(never silently preferred), because a one-time scan-and-pay is a much
+smaller ask than opening an app and authorizing inside it. See
+`checkout.py`'s module docstring for the exact policy and why it changed
+from the original "no QR, ever" framing.
 
 > **Verification status (2026-08-21):** the wire protocol, argument casing,
 > and most tool response shapes below are now **live-verified** against the
@@ -31,11 +36,12 @@ python -m feedme.auth login
 feedme "chicken bowl" --max-price 400 --fastest
 ```
 
-The CLI will show matching results and **wait for you to pick one** — it
-never adds anything to your cart on its own. If more than one zero-phone
-payment method is available, it asks you to pick that too; if there's only
-one (the common case today — Swiggy Money isn't always offered), it's used
-without an extra prompt since there's no real choice to confirm.
+The CLI will show matching results (paginated — `m` loads more) and **wait
+for you to pick one** — it never adds anything to your cart on its own. If
+more than one usable payment method is available (COD, Swiggy Money, or
+QR — never a full UPI app handoff), it asks you to pick; if there's only
+one, it's used without an extra prompt since there's no real choice to
+confirm.
 
 ## Architecture
 
@@ -44,7 +50,7 @@ CLI flags/query
   -> token auth check (~/.config/feedme/credentials.json)
   -> discovery (get_addresses -> search_menu, with a confirm-before-cart prompt)
   -> cart & coupon engine (flush_food_cart -> update_food_cart -> apply_food_coupon)
-  -> zero-phone payment execution (place_food_order via Swiggy Money / COD, with a confirm prompt)
+  -> payment execution (place_food_order via COD / Swiggy Money / QR, with a confirm prompt)
   -> live status polling (track_food_order)
 ```
 
@@ -62,8 +68,15 @@ no structured data at all, only human-readable text.
 
 ## Known gaps
 
-- **`place_food_order`** — never called live. The CLI's confirmation prompts
-  are the only safety gate before it fires for real.
+- **`place_food_order`** — one real attempt was made through the actual CLI
+  (COD) and it failed with "addressId is required" — a real bug (coupon
+  application was silently dropping `Cart.address_id`, now fixed, see git
+  history). A *successful* live call still hasn't happened. The CLI's
+  confirmation prompts are the only safety gate in front of it.
+- **QR payment payload shape** — `checkout.find_qr_payload()`'s list of
+  likely field names is an educated guess; generating a real QR requires
+  actually calling `place_food_order`, which hasn't been done. First real
+  QR order will confirm or correct it.
 - **Active-order tracking shape** — `track_food_order` has only been tested
   against already-delivered orders; the terminal-status phrasing in
   `tracking.py` is a best-effort guess pending a real in-flight order.

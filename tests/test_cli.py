@@ -63,9 +63,9 @@ def _patch_pipeline(
     monkeypatch.setattr(cart, "get_cart", fake_get_cart)
     monkeypatch.setattr(cart, "apply_best_coupon", fake_apply_best_coupon)
 
-    async def fake_get_zero_phone_payment_options(client):
+    async def fake_get_available_payment_options(client):
         if not zero_phone_available:
-            raise checkout.ZeroPhonePaymentUnavailable("no zero-phone options")
+            raise checkout.NoUsablePaymentOptions("no usable options")
         all_options = [
             PaymentOption(method_id="s1", method_type="SWIGGY_MONEY", display_name="Swiggy Money"),
             PaymentOption(method_id="COD", method_type="COD", display_name="Pay on delivery"),
@@ -76,7 +76,7 @@ def _patch_pipeline(
         return Order(order_id="o1", status="PLACED", total_amount=350)
 
     monkeypatch.setattr(
-        checkout, "get_zero_phone_payment_options", fake_get_zero_phone_payment_options
+        checkout, "get_available_payment_options", fake_get_available_payment_options
     )
     monkeypatch.setattr(checkout, "checkout", fake_checkout)
 
@@ -132,8 +132,8 @@ def test_cli_cancelling_selection_adds_nothing_to_cart(monkeypatch):
     assert "cancelled" in result.stdout.lower()
 
 
-def test_cli_exits_nonzero_when_no_zero_phone_payment(monkeypatch):
+def test_cli_exits_nonzero_when_no_usable_payment_options(monkeypatch):
     _patch_pipeline(monkeypatch, zero_phone_available=False)
     result = runner.invoke(cli.app, ["chicken bowl"], input="1\n")
     assert result.exit_code == 1
-    assert "zero-phone" in result.stdout.lower() or "phone" in result.stdout.lower()
+    assert "no usable options" in result.stdout.lower()
