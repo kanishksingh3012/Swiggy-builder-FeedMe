@@ -90,7 +90,8 @@ class MenuItem(BaseModel):
     protein_g: float | None = None
     restaurant_id: str | None = None
     restaurant_name: str | None = None
-    rating: float | None = None
+    rating: float | None = None  # per-dish rating, confirmed real — see docstring
+    restaurant_rating: float | None = None  # filled in by search.discover(), not the raw response
     in_stock: bool | None = Field(default=None, alias="inStock")
     veg: bool | None = Field(default=None, alias="isVeg")
     is_bestseller: bool | None = Field(default=None, alias="isBestseller")

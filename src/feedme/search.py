@@ -96,12 +96,20 @@ async def discover(
     # exist via search_restaurants (deliveryTimeMinutes), so enrich items
     # with their restaurant's ETA by matching restaurant_id. Best-effort:
     # items whose restaurant doesn't show up in this second search (a
-    # different result set) just keep eta_minutes=None.
+    # different result set) just keep eta_minutes/restaurant_rating=None.
+    # Restaurant-level rating (avgRating) is enriched the same way —
+    # search_menu's own "rating" field is a real per-dish rating
+    # (confirmed live: two dishes from one restaurant showed different
+    # values), which is a different, still-useful number kept as-is on
+    # MenuItem.rating rather than overwritten.
     restaurants = await search_restaurants(client, query, address_id=address_id)
     eta_by_restaurant = {r.restaurant_id: r.eta_minutes for r in restaurants if r.eta_minutes}
+    rating_by_restaurant = {r.restaurant_id: r.rating for r in restaurants if r.rating}
     for item in items:
         if item.eta_minutes is None and item.restaurant_id in eta_by_restaurant:
             item.eta_minutes = eta_by_restaurant[item.restaurant_id]
+        if item.restaurant_id in rating_by_restaurant:
+            item.restaurant_rating = rating_by_restaurant[item.restaurant_id]
 
     filtered = filter_items(items, max_price=max_price, fastest=fastest, min_protein=min_protein)
     return filtered, has_more, next_offset

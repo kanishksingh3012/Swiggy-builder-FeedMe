@@ -37,7 +37,7 @@ def _print_items_table(items: list[MenuItem]) -> None:
     table.add_column("#")
     table.add_column("Item")
     table.add_column("Restaurant")
-    table.add_column("Dish rating")
+    table.add_column("Rating")
     table.add_column("Price")
     table.add_column("ETA (min)")
     for idx, item in enumerate(items, start=1):
@@ -45,7 +45,7 @@ def _print_items_table(items: list[MenuItem]) -> None:
             str(idx),
             item.name or item.item_id,
             item.restaurant_name or "-",
-            str(item.rating) if item.rating is not None else "-",
+            str(item.restaurant_rating) if item.restaurant_rating is not None else "-",
             str(item.price) if item.price is not None else "-",
             str(item.eta_minutes) if item.eta_minutes is not None else "-",
         )
@@ -62,11 +62,13 @@ async def _select_item(
     """Show the results table with index numbers and require an
     explicit pick before anything touches the cart. Returns None if the
     user cancels (empty input or 'q') — nothing gets ordered on your
-    behalf. 'Dish rating' is per-item (confirmed live: two dishes from
-    the same restaurant can show different ratings), not the
-    restaurant's overall rating. search_menu is paginated (10/page,
-    confirmed live) — 'm' fetches and appends the next page rather than
-    silently hiding the rest of the results."""
+    behalf. The 'Rating' column shows the restaurant's overall rating
+    (MenuItem.restaurant_rating, filled in by search.discover() from
+    search_restaurants) rather than the per-dish rating search_menu
+    itself returns (MenuItem.rating — confirmed real and genuinely
+    different per dish, just not what's displayed here). search_menu is
+    paginated (10/page, confirmed live) — 'm' fetches and appends the
+    next page rather than silently hiding the rest of the results."""
     while True:
         _print_items_table(items)
         prompt = f"Pick an item [1-{len(items)}]"
