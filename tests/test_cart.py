@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from feedme.cart import add_items, best_coupon
-from models import Coupon, MenuItem
+from feedme.cart import add_items, apply_best_coupon, best_coupon
+from feedme.mcp_client import MCPToolError
+from models import Cart, Coupon, MenuItem
 
 
 def test_best_coupon_flat_discount():
@@ -54,15 +55,25 @@ def test_best_coupon_no_eligible_coupon_returns_none():
     assert best_coupon(coupons, cart_total=300) is None
 
 
-def test_best_coupon_real_shape_has_no_discount_value_returns_none():
-    # Confirmed live 2026-08-20: real fetch_food_coupons responses have
-    # no discount_value/min_order_value at all (free-text terms only).
-    # best_coupon must degrade to None rather than guess.
+def test_best_coupon_real_shape_ranks_by_applicable_and_parsed_savings():
+    # Confirmed live 2026-08-21: real fetch_food_coupons responses have
+    # no discount_value/min_order_value, but DO have a real `applicable`
+    # boolean the server precomputes, plus free-text like "Save ₹130 on
+    # this order!" for ones that qualify. SPECIALS was actually applied
+    # live against a ₹299 cart for a confirmed real ₹130 discount.
     coupons = [
-        Coupon(title="SWIGGYIT", subtitle="Add ₹179 more to avail this offer"),
-        Coupon(title="FLAT75", subtitle="Add ₹199 more to avail this offer"),
+        Coupon(title="SWIGGYIT", subtitle="Save ₹100 on this order!", applicable=True),
+        Coupon(title="SPECIALS", subtitle="Save ₹130 on this order!", applicable=True),
+        Coupon(title="FLAT200", subtitle="Add ₹999 more to avail this offer", applicable=False),
     ]
-    assert best_coupon(coupons, cart_total=89) is None
+    result = best_coupon(coupons, cart_total=299)
+    assert result is not None
+    assert result.coupon_code == "SPECIALS"
+
+
+def test_best_coupon_excludes_non_applicable():
+    coupons = [Coupon(title="FLAT200", subtitle="Add ₹999 more", applicable=False)]
+    assert best_coupon(coupons, cart_total=299) is None
 
 
 class _FakeClient:
@@ -86,6 +97,28 @@ async def test_add_items_sends_menu_item_id_and_cart_items_key():
     assert kwargs["addressId"] == "addr1"
     assert kwargs["restaurantId"] == "558346"
     assert kwargs["cartItems"] == [{"menu_item_id": "94940476", "quantity": 1}]
+
+
+class _RejectingClient:
+    """Simulates the real, confirmed-live behavior where a coupon
+    reports applicable=true but apply_food_coupon still rejects it for
+    an item-level reason (e.g. "Not applicable on pre-packaged & combo
+    items")."""
+
+    async def call_tool(self, tool_name, **kwargs):
+        if tool_name == "fetch_food_coupons":
+            coupon = {"title": "SPECIALS", "subtitle": "Save ₹130", "applicable": True}
+            return {"structuredContent": {"coupon_sections": [{"coupons": [coupon]}]}}
+        if tool_name == "apply_food_coupon":
+            raise MCPToolError("Not applicable on pre-packaged & combo items.")
+        raise AssertionError(f"unexpected tool call: {tool_name}")
+
+
+async def test_apply_best_coupon_swallows_application_time_rejection():
+    client = _RejectingClient()
+    cart = Cart(address_id="addr1", subtotal=299)
+    result = await apply_best_coupon(client, cart, "restaurant1")
+    assert result is cart
 
 
 async def test_add_items_rejects_mixed_restaurants():

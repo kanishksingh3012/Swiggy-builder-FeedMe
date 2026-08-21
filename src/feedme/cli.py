@@ -10,6 +10,7 @@ from rich.table import Table
 
 from feedme import auth, cart, checkout, search, tracking
 from feedme.mcp_client import MCPClient
+from models import MenuItem
 
 # `main` is registered via @app.command() (not @app.callback()): a Typer
 # app whose only entrypoint is a single @app.command() collapses to a
@@ -30,14 +31,48 @@ async def _ensure_authenticated() -> None:
         await auth.login()
 
 
+def _select_item(items: list[MenuItem]) -> MenuItem | None:
+    """Show the results table with index numbers and require an
+    explicit pick before anything touches the cart. Returns None if the
+    user cancels (empty input or 'q') — nothing gets ordered on your
+    behalf."""
+    table = Table(title="Results — pick one")
+    table.add_column("#")
+    table.add_column("Item")
+    table.add_column("Price")
+    table.add_column("ETA (min)")
+    for idx, item in enumerate(items, start=1):
+        table.add_row(
+            str(idx),
+            item.name or item.item_id,
+            str(item.price) if item.price is not None else "-",
+            str(item.eta_minutes) if item.eta_minutes is not None else "-",
+        )
+    console.print(table)
+
+    raw = typer.prompt(f"Pick an item [1-{len(items)}] (or 'q' to cancel)", default="q")
+    if raw.strip().lower() in ("q", ""):
+        return None
+    try:
+        choice = int(raw)
+    except ValueError:
+        console.print("[red]Not a number — cancelling.[/]")
+        return None
+    if not (1 <= choice <= len(items)):
+        console.print(f"[red]{choice} is out of range — cancelling.[/]")
+        return None
+    return items[choice - 1]
+
+
 async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> None:
     await _ensure_authenticated()
 
     async with MCPClient("food") as client:
         # Carts/orders are addressed by addressId, not a separate cart_id
-        # (confirmed live — see cart.py). Pick the first saved address as
-        # the delivery address, same pragmatic "take the first result"
-        # approach used below for menu items.
+        # (confirmed live — see cart.py). The delivery address is still
+        # autopicked (the account's first saved address) — that part was
+        # explicitly fine to keep simple. The menu item is not: nothing
+        # goes into the cart without an explicit pick below.
         addresses = await search.get_addresses(client)
         if not addresses:
             console.print("[yellow]No saved addresses on this account.[/]")
@@ -51,19 +86,11 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             console.print("[yellow]No menu items found for that query.[/]")
             return
 
-        table = Table(title=f"Results for '{query}'")
-        table.add_column("Item")
-        table.add_column("Price")
-        table.add_column("ETA (min)")
-        for item in items:
-            table.add_row(
-                item.name or item.item_id,
-                str(item.price) if item.price is not None else "-",
-                str(item.eta_minutes) if item.eta_minutes is not None else "-",
-            )
-        console.print(table)
+        chosen = _select_item(items)
+        if chosen is None:
+            console.print("[yellow]Cancelled — nothing added to cart.[/]")
+            return
 
-        chosen = items[0]
         await cart.flush_cart(client, address_id)
         await cart.add_items(client, address_id, [chosen])
         current_cart = await cart.get_cart(client, address_id)

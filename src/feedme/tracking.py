@@ -22,6 +22,50 @@ from models import Order, TrackingStatus
 
 TERMINAL_STATUSES = {"DELIVERED", "CANCELLED", "FAILED"}
 
+# UNVERIFIED: real stage/status strings for an active order have never
+# been observed (no in-flight order to test against — see module
+# docstring). This is a best-effort, Swiggy-app-style phrasing map with
+# a humanized fallback for anything unrecognized, so the terminal line
+# degrades gracefully rather than showing a raw enum either way.
+_STAGE_PHRASES: dict[str, str] = {
+    "ORDER_PLACED": "Order placed",
+    "PLACED": "Order placed",
+    "CONFIRMED": "Restaurant confirmed your order",
+    "ACCEPTED": "Restaurant confirmed your order",
+    "PREPARING": "Preparing your food",
+    "FOOD_PREPARING": "Preparing your food",
+    "OUT_FOR_DELIVERY": "Driver is on the way",
+    "DISPATCHED": "Driver is on the way",
+    "REACHING_RESTAURANT": "Driver is reaching the restaurant",
+    "ARRIVING_AT_RESTAURANT": "Driver is reaching the restaurant",
+    "REACHED_RESTAURANT": "Driver reached the restaurant",
+    "PICKED_UP": "Driver picked up your order",
+    "NEARBY": "Driver is reaching your location",
+    "REACHING_YOU": "Driver is reaching your location",
+    "DELIVERED": "Delivered",
+    "CANCELLED": "Order cancelled",
+    "FAILED": "Order failed",
+}
+
+
+def _friendly_stage(raw: str | None) -> str:
+    if not raw:
+        return "Waiting for an update"
+    key = raw.strip().upper().replace(" ", "_")
+    return _STAGE_PHRASES.get(key, raw.replace("_", " ").strip().capitalize())
+
+
+def _status_line(status: TrackingStatus) -> str:
+    """Single-line, Swiggy-app-style status text, e.g.
+    '12 min left — Driver is reaching the restaurant'."""
+    stage_text = _friendly_stage(status.stage or status.status)
+    if status.eta_minutes is not None:
+        eta = int(status.eta_minutes)
+        return f"{eta} min left — {stage_text}"
+    if status.status_message:
+        return status.status_message
+    return stage_text
+
 
 async def get_delivery_status(client: MCPClient, order_id: str) -> TrackingStatus:
     result = await client.call_tool("track_food_order", orderId=order_id)
@@ -59,7 +103,7 @@ async def track_order(
         while True:
             status = await get_delivery_status(client, order_id)
             if status_widget is not None:
-                status_widget.update(f"Order {order_id}: {status.stage or status.status or '...'}")
+                status_widget.update(_status_line(status))
             if _is_terminal(status) or time.monotonic() >= deadline:
                 return status
             await asyncio.sleep(poll_interval)

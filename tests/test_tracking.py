@@ -1,7 +1,27 @@
 from __future__ import annotations
 
-from feedme.tracking import _is_terminal, track_order
+from feedme.tracking import _is_terminal, _status_line, track_order
 from models import TrackingStatus
+
+
+def test_status_line_with_eta_and_known_stage():
+    status = TrackingStatus(order_id="o1", stage="REACHING_RESTAURANT", eta_minutes=12)
+    assert _status_line(status) == "12 min left — Driver is reaching the restaurant"
+
+
+def test_status_line_without_eta_uses_friendly_stage_only():
+    status = TrackingStatus(order_id="o1", status="OUT_FOR_DELIVERY")
+    assert _status_line(status) == "Driver is on the way"
+
+
+def test_status_line_unknown_stage_falls_back_to_humanized_text():
+    status = TrackingStatus(order_id="o1", status="SOME_NEW_STAGE", eta_minutes=5)
+    assert _status_line(status) == "5 min left — Some new stage"
+
+
+def test_status_line_no_stage_uses_status_message():
+    status = TrackingStatus(order_id="o1", status_message="No tracking information found")
+    assert _status_line(status) == "No tracking information found"
 
 
 def test_is_terminal_true_for_delivered():

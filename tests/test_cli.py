@@ -82,15 +82,28 @@ def test_cli_no_query_is_usage_error():
     assert result.exit_code != 0
 
 
-def test_cli_runs_full_pipeline(monkeypatch):
+def test_cli_runs_full_pipeline_after_confirming_item(monkeypatch):
     _patch_pipeline(monkeypatch)
-    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"])
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n")
     assert result.exit_code == 0
     assert "Chicken Bowl" in result.stdout
 
 
+def test_cli_cancelling_selection_adds_nothing_to_cart(monkeypatch):
+    _patch_pipeline(monkeypatch)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("cart.flush_cart should not run when the user cancels")
+
+    monkeypatch.setattr(cart, "flush_cart", fail_if_called)
+
+    result = runner.invoke(cli.app, ["chicken bowl"], input="q\n")
+    assert result.exit_code == 0
+    assert "cancelled" in result.stdout.lower()
+
+
 def test_cli_exits_nonzero_when_no_zero_phone_payment(monkeypatch):
     _patch_pipeline(monkeypatch, zero_phone_available=False)
-    result = runner.invoke(cli.app, ["chicken bowl"])
+    result = runner.invoke(cli.app, ["chicken bowl"], input="1\n")
     assert result.exit_code == 1
     assert "zero-phone" in result.stdout.lower() or "phone" in result.stdout.lower()

@@ -13,17 +13,23 @@ then flushed back to empty — no order was placed):
   - fetch_food_coupons requires addressId and restaurantId, and only
     returns coupons when there's an active cart with items in it.
 
-apply_food_coupon's argument casing is NOT live-tested: its terms
-explicitly state "Coupon code can be applied only once in 2 hr on this
-restaurant" — a real, if non-monetary, side effect not worth burning on
-a guess. See best_coupon()'s docstring for why "maximize the discount"
-doesn't actually work against the real API today.
+apply_food_coupon confirmed live too (2026-08-21): addressId + couponCode
+(the coupon's `title` text, e.g. "SPECIALS" — not its `id` UUID) applied
+a real ₹130 discount against a ₹299 cart, then the cart was flushed back
+to empty. The real fetch_food_coupons response also carries a genuine
+per-coupon `applicable` boolean the server precomputes — best_coupon()
+ranks off that (plus a best-effort parse of "Save ₹N" subtitle text)
+rather than the nonexistent discount_value/min_order_value fields.
 """
 
 from __future__ import annotations
 
-from feedme.mcp_client import MCPClient, structured_content
+import re
+
+from feedme.mcp_client import MCPClient, MCPToolError, structured_content
 from models import Cart, Coupon, MenuItem
+
+_SAVE_AMOUNT_RE = re.compile(r"(?:save|maximum discount)[:\s]*₹\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
 
 
 async def flush_cart(client: MCPClient, address_id: str) -> None:
@@ -61,45 +67,63 @@ async def fetch_coupons(client: MCPClient, address_id: str, restaurant_id: str) 
 
 
 def _effective_discount(coupon: Coupon, cart_total: float) -> float:
-    """Best-effort numeric ranking — only meaningful if discount_value
-    is populated, which the real fetch_food_coupons response never does
-    (see Coupon's docstring). Kept so this still works if a future/
-    differently-shaped response does supply numbers."""
-    if coupon.discount_value is None:
-        return 0.0
-    if coupon.discount_type == "percentage":
-        discount = cart_total * (coupon.discount_value / 100)
-        if coupon.max_discount is not None:
-            discount = min(discount, coupon.max_discount)
-        return discount
-    return coupon.discount_value
+    """Numeric ranking score. Prefers a real discount_value if some
+    future/differently-shaped response supplies one; otherwise parses
+    the "Save ₹N" / "Maximum discount: ₹N" pattern out of the real
+    subtitle/description text. Falls back to 0 (still rankable, just
+    lowest priority) rather than excluding the coupon outright — an
+    `applicable: true` coupon with unparseable text is still a valid
+    pick, just not a differentiable one."""
+    if coupon.discount_value is not None:
+        if coupon.discount_type == "percentage":
+            discount = cart_total * (coupon.discount_value / 100)
+            if coupon.max_discount is not None:
+                discount = min(discount, coupon.max_discount)
+            return discount
+        return coupon.discount_value
+    for text in (coupon.subtitle, coupon.description):
+        if text:
+            match = _SAVE_AMOUNT_RE.search(text)
+            if match:
+                return float(match.group(1))
+    return 0.0
 
 
 def best_coupon(coupons: list[Coupon], cart_total: float) -> Coupon | None:
-    """Against the real Swiggy coupon shape (free-text terms, no
-    discount_value/min_order_value fields), this always returns None —
-    there's nothing numeric to rank. That's a deliberate, safe
-    degradation: guessing which coupon is "best" from unstructured text
-    risks applying the wrong one and burning its real 2-hour
-    per-restaurant cooldown for no reason. Ranking real coupons would
-    need either parsing the free-text descriptions or a still-unverified
-    per-coupon applicability field — not attempted here."""
-    eligible = [c for c in coupons if c.min_order_value is None or cart_total >= c.min_order_value]
-    ranked = [c for c in eligible if c.discount_value is not None]
-    if not ranked:
+    """Ranks by the server's own `applicable` flag first (confirmed
+    real and authoritative — see module docstring), then by parsed
+    savings amount. min_order_value is checked too, only as a fallback
+    for coupons where `applicable` wasn't supplied at all."""
+    eligible = [
+        c
+        for c in coupons
+        if c.applicable is True
+        or (c.applicable is None and (c.min_order_value is None or cart_total >= c.min_order_value))
+    ]
+    if not eligible:
         return None
-    return max(ranked, key=lambda c: _effective_discount(c, cart_total))
+    return max(eligible, key=lambda c: _effective_discount(c, cart_total))
 
 
 async def apply_best_coupon(client: MCPClient, cart: Cart, restaurant_id: str) -> Cart:
+    """Confirmed live (2026-08-21): the server's `applicable: true` flag
+    is necessary but not sufficient — a coupon can still be rejected at
+    the point of application for item-level reasons it doesn't capture
+    (e.g. "Not applicable on pre-packaged & combo items", seen on a real
+    call). Checkout shouldn't fail just because a discount didn't land,
+    so an application-time rejection here is swallowed and the cart is
+    returned as-is rather than raised — a missed coupon is a poor
+    outcome, a crashed order is a worse one."""
     if cart.address_id is None:
         return cart
     coupons = await fetch_coupons(client, cart.address_id, restaurant_id)
     chosen = best_coupon(coupons, cart.subtotal or 0.0)
     if chosen is None:
         return cart
-    # UNVERIFIED argument casing — see module docstring on the 2hr-cooldown risk.
-    result = await client.call_tool(
-        "apply_food_coupon", addressId=cart.address_id, couponCode=chosen.coupon_code
-    )
+    try:
+        result = await client.call_tool(
+            "apply_food_coupon", addressId=cart.address_id, couponCode=chosen.coupon_code
+        )
+    except MCPToolError:
+        return cart
     return Cart.model_validate(structured_content(result))

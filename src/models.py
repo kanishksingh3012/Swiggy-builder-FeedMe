@@ -113,14 +113,16 @@ class Cart(BaseModel):
 
 
 class Coupon(BaseModel):
-    """Verified live against fetch_food_coupons on 2026-08-20 — and the
-    real shape has no numeric discount/min-order fields at all. Terms
-    are free text ("get 50% off... Maximum discount: ₹100", "Add ₹179
-    more to avail this offer"). discount_value/max_discount/
-    min_order_value below are kept only as an optional fallback for a
-    hypothetical differently-shaped response; they are never populated
-    by the real API, which is why cart.best_coupon() currently can't
-    reliably rank real coupons — see the note there."""
+    """Verified live against fetch_food_coupons on 2026-08-20, including
+    a real apply_food_coupon call (title text like "SPECIALS" is the
+    couponCode apply_food_coupon wants — confirmed, applied a real ₹130
+    discount, then cleaned up). There's no numeric discount/min-order
+    field, but there IS a real `applicable` boolean the server
+    precomputes — cart.best_coupon() ranks off that plus a best-effort
+    parse of the "Save ₹N" subtitle text, not off discount_value/
+    max_discount/min_order_value below, which are kept only as a
+    fallback for a hypothetical differently-shaped response and are
+    never populated by the real API."""
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -129,6 +131,7 @@ class Coupon(BaseModel):
     subtitle: str | None = None
     description: str | None = None
     ribbon_text: str | None = Field(default=None, alias="ribbonText")
+    applicable: bool | None = None
     discount_type: str | None = None  # never populated by the real API — see docstring
     discount_value: float | None = None
     max_discount: float | None = None
