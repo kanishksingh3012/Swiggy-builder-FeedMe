@@ -121,6 +121,43 @@ async def test_apply_best_coupon_swallows_application_time_rejection():
     assert result is cart
 
 
+class _RealisticClient:
+    """Confirmed live 2026-08-21: update_food_cart's and
+    apply_food_coupon's own success responses have NO addressId field
+    at all — only get_food_cart reliably includes it. A real run hit
+    this: place_food_order failed with "addressId is required" because
+    the Cart returned from a successful coupon application had silently
+    lost its address_id. This fake reproduces that exact response gap
+    so add_items()/apply_best_coupon() are proven to route around it via
+    get_food_cart rather than trusting the mutation response."""
+
+    async def call_tool(self, tool_name, **kwargs):
+        if tool_name == "update_food_cart":
+            return {"structuredContent": {"statusMessage": "CART_UPDATED_SUCCESSFULLY"}}
+        if tool_name == "fetch_food_coupons":
+            coupon = {"title": "SPECIALS", "subtitle": "Save ₹130", "applicable": True}
+            return {"structuredContent": {"coupon_sections": [{"coupons": [coupon]}]}}
+        if tool_name == "apply_food_coupon":
+            return {"structuredContent": {"statusMessage": "CART_UPDATED_SUCCESSFULLY"}}
+        if tool_name == "get_food_cart":
+            return {"structuredContent": {"addressId": kwargs["addressId"], "subtotal": 299}}
+        raise AssertionError(f"unexpected tool call: {tool_name}")
+
+
+async def test_add_items_preserves_address_id_despite_response_gap():
+    client = _RealisticClient()
+    item = MenuItem(item_id="153131180", restaurant_id="968342")
+    result = await add_items(client, "addr1", [item])
+    assert result.address_id == "addr1"
+
+
+async def test_apply_best_coupon_preserves_address_id_despite_response_gap():
+    client = _RealisticClient()
+    cart = Cart(address_id="addr1", subtotal=299)
+    result = await apply_best_coupon(client, cart, "restaurant1")
+    assert result.address_id == "addr1"
+
+
 async def test_add_items_rejects_mixed_restaurants():
     client = _FakeClient()
     items = [

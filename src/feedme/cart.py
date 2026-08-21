@@ -44,10 +44,14 @@ async def add_items(client: MCPClient, address_id: str, items: list[MenuItem]) -
         )
     restaurant_id = next(iter(restaurant_ids), None)
     cart_items = [{"menu_item_id": i.item_id, "quantity": 1} for i in items]
-    result = await client.call_tool(
+    await client.call_tool(
         "update_food_cart", addressId=address_id, restaurantId=restaurant_id, cartItems=cart_items
     )
-    return Cart.model_validate(structured_content(result))
+    # update_food_cart's own response has no addressId field either
+    # (confirmed live, same gap as apply_food_coupon — see
+    # apply_best_coupon's docstring for the real bug this caused). Not
+    # trusting it as a complete Cart; get_food_cart reliably is.
+    return await get_cart(client, address_id)
 
 
 async def get_cart(client: MCPClient, address_id: str) -> Cart:
@@ -113,7 +117,17 @@ async def apply_best_coupon(client: MCPClient, cart: Cart, restaurant_id: str) -
     call). Checkout shouldn't fail just because a discount didn't land,
     so an application-time rejection here is swallowed and the cart is
     returned as-is rather than raised — a missed coupon is a poor
-    outcome, a crashed order is a worse one."""
+    outcome, a crashed order is a worse one.
+
+    A real bug lived here until 2026-08-21: on success this used to
+    build the returned Cart straight from apply_food_coupon's own
+    response — which has no `addressId` field at all (confirmed live).
+    That silently dropped Cart.address_id to None, which then made
+    place_food_order fail for real with "addressId is required" (caught
+    by an actual live run). Fixed by re-fetching the cart via
+    get_food_cart after a successful apply, since that response is
+    confirmed to reliably include addressId — not trusting each
+    mutation endpoint's own response shape to be a complete Cart."""
     if cart.address_id is None:
         return cart
     coupons = await fetch_coupons(client, cart.address_id, restaurant_id)
@@ -121,9 +135,9 @@ async def apply_best_coupon(client: MCPClient, cart: Cart, restaurant_id: str) -
     if chosen is None:
         return cart
     try:
-        result = await client.call_tool(
+        await client.call_tool(
             "apply_food_coupon", addressId=cart.address_id, couponCode=chosen.coupon_code
         )
     except MCPToolError:
         return cart
-    return Cart.model_validate(structured_content(result))
+    return await get_cart(client, cart.address_id)

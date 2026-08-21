@@ -172,8 +172,7 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             return
 
         await cart.flush_cart(client, address_id)
-        await cart.add_items(client, address_id, [chosen])
-        current_cart = await cart.get_cart(client, address_id)
+        current_cart = await cart.add_items(client, address_id, [chosen])
         if chosen.restaurant_id is not None:
             current_cart = await cart.apply_best_coupon(client, current_cart, chosen.restaurant_id)
 
