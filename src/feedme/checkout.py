@@ -147,12 +147,14 @@ def _render_qr(payload: str) -> None:
 
 async def checkout(client: MCPClient, cart: Cart, payment_option: PaymentOption) -> Order:
     # Carts are addressed by addressId, not a separate cart_id (confirmed
-    # live — see cart.py). paymentMethodId's casing follows the same
-    # confirmed pattern but hasn't been independently tested —
-    # place_food_order is a real, money-moving action, deliberately not
-    # smoke-tested live.
+    # live — see cart.py). paymentMethodId was wrong — a real live run
+    # (2026-08-21) failed with "No payment method selected... call
+    # place_food_order with the selected paymentMethod", which both
+    # names the real argument (paymentMethod, not paymentMethodId) and
+    # confirms the value is the option's id directly. No order was
+    # placed by that failed attempt.
     result = await client.call_tool(
-        "place_food_order", addressId=cart.address_id, paymentMethodId=payment_option.method_id
+        "place_food_order", addressId=cart.address_id, paymentMethod=payment_option.method_id
     )
     content = structured_content(result)
     order = Order.model_validate(content)
