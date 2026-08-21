@@ -120,7 +120,7 @@ def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None
     table.add_column("Method")
     table.add_column("Type")
     for idx, option in enumerate(options, start=1):
-        kind = "QR (scan required)" if checkout._is_qr(option) else "Zero-phone"
+        kind = "Mobile (payment confirmation only)" if checkout._is_qr(option) else "Zero-phone"
         table.add_row(str(idx), option.display_name or option.method_id, kind)
     console.print(table)
 
