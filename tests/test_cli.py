@@ -19,7 +19,9 @@ class _FakeMCPClient:
         return None
 
 
-def _patch_pipeline(monkeypatch, *, zero_phone_available: bool = True) -> None:
+def _patch_pipeline(
+    monkeypatch, *, zero_phone_available: bool = True, payment_option_count: int = 1
+) -> None:
     async def fake_ensure_authenticated() -> None:
         return None
 
@@ -61,7 +63,11 @@ def _patch_pipeline(monkeypatch, *, zero_phone_available: bool = True) -> None:
     async def fake_get_zero_phone_payment_options(client):
         if not zero_phone_available:
             raise checkout.ZeroPhonePaymentUnavailable("no zero-phone options")
-        return [PaymentOption(method_id="s1", method_type="swiggy_money")]
+        all_options = [
+            PaymentOption(method_id="s1", method_type="SWIGGY_MONEY", display_name="Swiggy Money"),
+            PaymentOption(method_id="COD", method_type="COD", display_name="Pay on delivery"),
+        ]
+        return all_options[:payment_option_count]
 
     async def fake_checkout(client, cart_obj, payment_option):
         return Order(order_id="o1", status="PLACED", total_amount=350)
@@ -87,6 +93,27 @@ def test_cli_runs_full_pipeline_after_confirming_item(monkeypatch):
     result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n")
     assert result.exit_code == 0
     assert "Chicken Bowl" in result.stdout
+
+
+def test_cli_prompts_for_payment_method_when_multiple_available(monkeypatch):
+    _patch_pipeline(monkeypatch, payment_option_count=2)
+    # "1\n" picks the item, "2\n" picks the second payment method (COD)
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n2\n")
+    assert result.exit_code == 0
+    assert "payment" in result.stdout.lower()
+
+
+def test_cli_cancelling_payment_selection_does_not_place_order(monkeypatch):
+    _patch_pipeline(monkeypatch, payment_option_count=2)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("checkout.checkout should not run when payment selection is cancelled")
+
+    monkeypatch.setattr(checkout, "checkout", fail_if_called)
+
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\nq\n")
+    assert result.exit_code == 0
+    assert "not placed" in result.stdout.lower()
 
 
 def test_cli_cancelling_selection_adds_nothing_to_cart(monkeypatch):

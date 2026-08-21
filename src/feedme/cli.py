@@ -10,7 +10,7 @@ from rich.table import Table
 
 from feedme import auth, cart, checkout, search, tracking
 from feedme.mcp_client import MCPClient
-from models import MenuItem
+from models import MenuItem, PaymentOption
 
 # `main` is registered via @app.command() (not @app.callback()): a Typer
 # app whose only entrypoint is a single @app.command() collapses to a
@@ -64,6 +64,38 @@ def _select_item(items: list[MenuItem]) -> MenuItem | None:
     return items[choice - 1]
 
 
+def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None:
+    """Same confirm-before-acting principle as _select_item, applied to
+    payment method. If there's only one zero-phone option (the only case
+    seen live so far — COD, no Swiggy Money on the test account), there's
+    no actual decision to make, so it's used without prompting rather
+    than adding a confirmation with nothing to confirm. A real choice
+    between options (e.g. once Swiggy Money is also available) still
+    gets the same explicit-pick treatment as menu items."""
+    if len(options) == 1:
+        return options[0]
+
+    table = Table(title="Zero-phone payment options — pick one")
+    table.add_column("#")
+    table.add_column("Method")
+    for idx, option in enumerate(options, start=1):
+        table.add_row(str(idx), option.display_name or option.method_id)
+    console.print(table)
+
+    raw = typer.prompt(f"Pick a payment method [1-{len(options)}] (or 'q' to cancel)", default="q")
+    if raw.strip().lower() in ("q", ""):
+        return None
+    try:
+        choice = int(raw)
+    except ValueError:
+        console.print("[red]Not a number — cancelling.[/]")
+        return None
+    if not (1 <= choice <= len(options)):
+        console.print(f"[red]{choice} is out of range — cancelling.[/]")
+        return None
+    return options[choice - 1]
+
+
 async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> None:
     await _ensure_authenticated()
 
@@ -103,7 +135,12 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             console.print(f"[red]{exc}[/]")
             raise typer.Exit(code=1) from exc
 
-        order = await checkout.checkout(client, current_cart, payment_options[0])
+        payment_option = _select_payment_option(payment_options)
+        if payment_option is None:
+            console.print("[yellow]Cancelled — order not placed.[/]")
+            return
+
+        order = await checkout.checkout(client, current_cart, payment_option)
         await tracking.track_order(client, order.order_id)
 
 

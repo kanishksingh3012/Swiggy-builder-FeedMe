@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class Credentials(BaseModel):
@@ -48,28 +48,42 @@ class Address(BaseModel):
 
 
 class Restaurant(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    """Verified live against search_restaurants on 2026-08-21 — real
+    fields are id/name/avgRating/deliveryTimeMinutes, nothing like the
+    original restaurant_id/eta_minutes/rating guess."""
 
-    restaurant_id: str
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    restaurant_id: str = Field(alias="id")
     name: str | None = None
-    eta_minutes: float | None = None
-    rating: float | None = None
+    eta_minutes: float | None = Field(default=None, alias="deliveryTimeMinutes")
+    rating: float | None = Field(default=None, alias="avgRating")
+    cuisines: list[str] = Field(default_factory=list)
+    cost_for_two: str | None = Field(default=None, alias="costForTwo")
+    area_name: str | None = Field(default=None, alias="areaName")
+    veg: bool | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
 class MenuItem(BaseModel):
-    """Verified live against search_menu on 2026-08-20. The real server
-    mixes camelCase (isVeg, imageUrl, hasAddons) and snake_case
-    (menu_item_id, restaurant_id, restaurant_name) field names in the
-    same object — not a typo here, that inconsistency is real.
-    eta_minutes/protein_g were never present in a real response; kept as
-    optional guesses since the CLI's --fastest/protein filters need them
-    if the server ever supplies them under some name."""
+    """Verified live against both search_menu and get_restaurant_menu on
+    2026-08-20/21. The real server mixes camelCase (isVeg, imageUrl,
+    hasAddons) and snake_case (menu_item_id, restaurant_id,
+    restaurant_name) field names in the same object — not a typo here,
+    that inconsistency is real. Worse: search_menu items key their id as
+    "menu_item_id", but get_restaurant_menu items (nested under
+    categories[].items, not a flat "items" list — see
+    search.get_restaurant_menu) key the *same* id as plain "id" instead
+    — hence AliasChoices trying both. eta_minutes/protein_g were never
+    present in a real response; kept as optional guesses since the
+    CLI's --fastest/protein filters need them if the server ever
+    supplies them under some name."""
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    item_id: str = Field(alias="menu_item_id")
+    item_id: str = Field(validation_alias=AliasChoices("menu_item_id", "id"))
     name: str | None = None
+    description: str | None = None
     price: float | None = None
     currency: str = "INR"
     eta_minutes: float | None = None
@@ -79,6 +93,7 @@ class MenuItem(BaseModel):
     rating: float | None = None
     in_stock: bool | None = Field(default=None, alias="inStock")
     veg: bool | None = Field(default=None, alias="isVeg")
+    is_bestseller: bool | None = Field(default=None, alias="isBestseller")
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

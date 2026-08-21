@@ -76,6 +76,22 @@ async def get_delivery_status(client: MCPClient, order_id: str) -> TrackingStatu
     return TrackingStatus(order_id=order_id, status_message=content.get("statusMessage"))
 
 
+async def get_order_details_text(client: MCPClient, order_id: str) -> str:
+    """get_food_order_details — a real tool (referenced by
+    get_food_orders' own output) that wasn't in the doc-derived tool
+    list at all. Confirmed live (2026-08-21): unlike every other tool
+    tested, its structuredContent is always empty — the order details
+    (items, address, total, payment method) only exist as human-
+    readable text in `content`. No model built around it since there's
+    no structure to model; this just surfaces that text as-is."""
+    result = await client.call_tool("get_food_order_details", orderId=order_id)
+    for block in result.get("content", []):
+        if block.get("type") == "text":
+            text: str = block["text"]
+            return text
+    return ""
+
+
 async def list_orders(client: MCPClient, address_id: str) -> list[Order]:
     result = await client.call_tool("get_food_orders", addressId=address_id)
     orders = structured_content(result).get("orders", [])

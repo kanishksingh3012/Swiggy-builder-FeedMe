@@ -1,10 +1,12 @@
 """Discovery: addresses -> menu/restaurant search -> filtering.
 
-Argument casing: confirmed live that search_menu rejects address_id
-("addressId is required") and accepts addressId — the server expects
-camelCase tool arguments. Applied consistently below; only addressId
-itself has been directly confirmed, restaurantId is inferred from the
-same pattern and not yet independently tested.
+Argument casing confirmed live for all four tools below: addressId
+(search_menu, search_restaurants, get_restaurant_menu — the latter also
+needs restaurantId). get_restaurant_menu's real response shape is
+notably different from search_menu's: items are nested under
+categories[].items (not a flat "items" list), and each item's id key is
+"id" rather than search_menu's "menu_item_id" — see models.MenuItem's
+docstring for how that's reconciled.
 """
 
 from __future__ import annotations
@@ -35,9 +37,14 @@ async def search_restaurants(
     return [Restaurant.model_validate(r) for r in restaurants]
 
 
-async def get_restaurant_menu(client: MCPClient, restaurant_id: str) -> list[MenuItem]:
-    result = await client.call_tool("get_restaurant_menu", restaurantId=restaurant_id)
-    items = structured_content(result).get("items", [])
+async def get_restaurant_menu(
+    client: MCPClient, restaurant_id: str, address_id: str
+) -> list[MenuItem]:
+    result = await client.call_tool(
+        "get_restaurant_menu", restaurantId=restaurant_id, addressId=address_id
+    )
+    categories = structured_content(result).get("categories", [])
+    items = [i for category in categories for i in category.get("items", [])]
     return [MenuItem.model_validate(i) for i in items]
 
 

@@ -119,16 +119,53 @@ mypy src/
 
 ---
 
-## 8. MCP Docs Verification Log (as of 2026-08-20)
+## 8. MCP Docs Verification Log
 
+### 2026-08-20 — initial doc-based verification
 `mcp.swiggy.com/builders` index/reference pages returned inconsistent
 tool counts on generic index fetches (15 vs. 17 tools listed across two
 fetches). Targeted fetches of `llms-full.txt`, `/docs/start/authenticate.md`,
 `/docs/reference/errors.md`, and `/docs/operate/rate-limits.md` were
 internally consistent and corroborated this file's own stated facts
-(14 Food tools, `expires_in=432000`). Those targeted fetches are what the
-current codebase is built against. See `README.md` for the verified
-tool list and endpoint details. Wire-format for individual tool calls
-(JSON-RPC envelope vs. REST) and exact `payment_option`/`client_id`
-values remain unverified — re-check against live docs before relying on
-them.
+(14 Food tools, `expires_in=432000`). Auth flow (OAuth 2.1 PKCE,
+`/auth/authorize` + `/auth/token`) confirmed working live the same day —
+a real access token was obtained end-to-end.
+
+### 2026-08-20/21 — live tool-by-tool verification
+Doc fetches gave the right *auth* details but the wrong *tool-call*
+details — actually calling each tool overturned several doc-derived
+guesses:
+- Wire format is JSON-RPC 2.0 over Streamable HTTP (`method: "tools/call"`,
+  requires `Accept: application/json, text/event-stream` or 406s) — not
+  the REST-style guess this was originally built against.
+- Tool arguments are camelCase (`addressId`, not `address_id`).
+- Domain errors surface as `isError: true` inside a 200 JSON-RPC result,
+  not as HTTP errors or JSON-RPC `error` objects.
+- There is no `cart_id` — carts/coupons/orders are all addressed by
+  `addressId` (same id as `get_addresses`).
+- Real response shapes for addresses, menu search, restaurant search,
+  restaurant menus, cart, coupons, past orders, and payment options were
+  all captured from live calls and are now what `models.py` is built
+  against (see each model's docstring for specifics and the date it was
+  confirmed). Two different tools return menu items with two different
+  id field names (`menu_item_id` vs `id`) for what's otherwise the same
+  shape — reconciled via `pydantic.AliasChoices`, not a typo.
+- `get_food_order_details` is a real tool (the server's own output
+  referenced it) that was missing from the original 14-tool doc-derived
+  list entirely — that list undercounted by at least one.
+- `apply_food_coupon` confirmed live: `couponCode` is the coupon's
+  human-readable `title` (e.g. `"SPECIALS"`), not its `id` UUID. Its own
+  terms state it can only be applied once per 2 hours per restaurant —
+  a real, non-monetary cost, which is why it wasn't tested more than once.
+- `place_food_order` remains deliberately never called live — the CLI's
+  confirmation prompts (item, then payment method) are the only gate in
+  front of it.
+
+`search_restaurants` and `get_restaurant_menu` were also live-verified
+(2026-08-21) — the latter nests items under `categories[].items` rather
+than a flat `items` list, unlike `search_menu`.
+
+Wire-format/shape assumptions still resting on inference rather than a
+live call: an *active* order's `track_food_order` shape (only "nothing
+to track" was observed, since no in-flight order existed to test
+against), and `report_error`.
