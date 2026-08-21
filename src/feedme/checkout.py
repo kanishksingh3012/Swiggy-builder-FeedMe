@@ -73,6 +73,12 @@ def _is_qr(option: PaymentOption) -> bool:
     return bool(normalized & QR_ALIASES)
 
 
+def _is_cod(option: PaymentOption) -> bool:
+    candidates = {option.method_type, option.method_id, option.display_name}
+    normalized = {c.strip().lower().replace(" ", "_") for c in candidates if c}
+    return bool(normalized & ZERO_PHONE_ALIASES["cod"])
+
+
 async def get_payment_options(client: MCPClient) -> list[PaymentOption]:
     result = await client.call_tool("get_payment_options")
     methods = structured_content(result).get("allMethods", [])
@@ -147,15 +153,27 @@ def _render_qr(payload: str) -> None:
 
 async def checkout(client: MCPClient, cart: Cart, payment_option: PaymentOption) -> Order:
     # Carts are addressed by addressId, not a separate cart_id (confirmed
-    # live — see cart.py). paymentMethodId was wrong — a real live run
-    # (2026-08-21) failed with "No payment method selected... call
-    # place_food_order with the selected paymentMethod", which both
-    # names the real argument (paymentMethod, not paymentMethodId) and
-    # confirms the value is the option's id directly. No order was
-    # placed by that failed attempt.
-    result = await client.call_tool(
-        "place_food_order", addressId=cart.address_id, paymentMethod=payment_option.method_id
-    )
+    # live — see cart.py). Two real, live-caught fixes went into this:
+    # (1) the argument is paymentMethod, not paymentMethodId; (2) its
+    # value is a broad category, not the option's own id — passing
+    # "PayWithQR" directly was rejected outright with "Unsupported
+    # payment method... Use 'UPI' with intentApp/generateUPIQR for UPI
+    # payments, or 'Cash' for cash on delivery." So COD maps to
+    # paymentMethod="Cash", QR maps to paymentMethod="UPI" +
+    # generateUPIQR=True. Neither attempt placed an order. Swiggy
+    # Money's real paymentMethod value has never been seen (no such
+    # option exists on the test account) — falls back to an UNVERIFIED
+    # guess if that ever comes up.
+    kwargs: dict[str, Any] = {"addressId": cart.address_id}
+    if _is_qr(payment_option):
+        kwargs["paymentMethod"] = "UPI"
+        kwargs["generateUPIQR"] = True
+    elif _is_cod(payment_option):
+        kwargs["paymentMethod"] = "Cash"
+    else:
+        kwargs["paymentMethod"] = payment_option.method_type or payment_option.method_id
+
+    result = await client.call_tool("place_food_order", **kwargs)
     content = structured_content(result)
     order = Order.model_validate(content)
     _render_receipt(order)

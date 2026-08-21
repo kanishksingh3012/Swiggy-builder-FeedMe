@@ -7,9 +7,10 @@ from feedme.checkout import (
     ZeroPhonePaymentUnavailable,
     _is_qr,
     _is_zero_phone,
+    checkout,
     find_qr_payload,
 )
-from models import PaymentOption
+from models import Cart, PaymentOption
 
 
 def _opt(
@@ -159,3 +160,42 @@ async def test_get_zero_phone_payment_options_raises_when_empty(monkeypatch):
 
     with pytest.raises(ZeroPhonePaymentUnavailable):
         await checkout.get_zero_phone_payment_options(client=None)
+
+
+class _RecordingClient:
+    def __init__(self, response: dict | None = None) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        default = {"structuredContent": {"orderId": "o1", "orderStatus": "PLACED"}}
+        self._response = response or default
+
+    async def call_tool(self, tool_name, **kwargs):
+        self.calls.append((tool_name, kwargs))
+        return self._response
+
+
+async def test_checkout_cod_sends_cash_category_not_option_id():
+    # Confirmed live 2026-08-21: place_food_order wants a broad category
+    # ("Cash"), not the option's own id ("COD") — real error was "No
+    # payment method selected" when the raw id was sent as paymentMethod.
+    client = _RecordingClient()
+    cart = Cart(address_id="addr1")
+    cod = PaymentOption.model_validate({"id": "COD", "groupName": "COD", "displayName": "COD"})
+    await checkout(client, cart, cod)
+    tool_name, kwargs = client.calls[0]
+    assert tool_name == "place_food_order"
+    assert kwargs == {"addressId": "addr1", "paymentMethod": "Cash"}
+
+
+async def test_checkout_qr_sends_upi_category_and_generate_flag():
+    # Confirmed live 2026-08-21: sending paymentMethod="PayWithQR"
+    # directly was rejected with "Unsupported payment method... Use
+    # 'UPI' with intentApp/generateUPIQR for UPI payments."
+    client = _RecordingClient()
+    cart = Cart(address_id="addr1")
+    qr = PaymentOption.model_validate(
+        {"id": "PayWithQR", "groupName": "UPI", "displayName": "Pay with QR"}
+    )
+    await checkout(client, cart, qr)
+    tool_name, kwargs = client.calls[0]
+    assert tool_name == "place_food_order"
+    assert kwargs == {"addressId": "addr1", "paymentMethod": "UPI", "generateUPIQR": True}
