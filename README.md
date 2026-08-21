@@ -18,10 +18,14 @@ from the original "no QR, ever" framing.
 > since the server itself mixes camelCase and snake_case field names in the
 > same object.
 >
-> **Still unverified:** `place_food_order` itself (never called — real
-> money), the shape of an *active* order's tracking data (no in-flight order
-> existed to test against), and `report_error`. Everything else in the
-> 14-tool Food list has been exercised live at least once.
+> **`place_food_order` is now confirmed live** for the QR path — a real
+> order was placed with a genuine, scannable UPI QR that correctly opened
+> payment apps when scanned. Two real failed attempts got it there (wrong
+> argument name, then wrong argument value — see `checkout.py`'s
+> docstrings). **Still unverified:** the COD path specifically (fixed the
+> same way, not yet independently confirmed), the shape of an *active*
+> order's tracking data (no in-flight order existed to test against until
+> now), and `report_error`.
 
 ## Install
 
@@ -54,12 +58,13 @@ CLI flags/query
   -> live status polling (track_food_order)
 ```
 
-Food server tools used (14 total, all live-tested except `place_food_order`
-and `report_error`): `get_addresses`, `search_restaurants`,
-`get_restaurant_menu`, `search_menu`, `update_food_cart`, `get_food_cart`,
-`flush_food_cart`, `fetch_food_coupons`, `apply_food_coupon`,
-`place_food_order`, `get_food_orders`, `track_food_order`,
-`get_payment_options`, `report_error`.
+Food server tools used (14 total, all live-tested including
+`place_food_order` now, except `report_error`): `get_addresses`,
+`search_restaurants`, `get_restaurant_menu`, `search_menu`,
+`update_food_cart`, `get_food_cart`, `flush_food_cart`,
+`fetch_food_coupons`, `apply_food_coupon`, `place_food_order`,
+`get_food_orders`, `track_food_order`, `get_payment_options`,
+`report_error`.
 
 One tool outside that list, `get_food_order_details`, was found to be real
 too (referenced by `get_food_orders`' own output) — it's wired up in
@@ -68,15 +73,14 @@ no structured data at all, only human-readable text.
 
 ## Known gaps
 
-- **`place_food_order`** — one real attempt was made through the actual CLI
-  (COD) and it failed with "addressId is required" — a real bug (coupon
-  application was silently dropping `Cart.address_id`, now fixed, see git
-  history). A *successful* live call still hasn't happened. The CLI's
-  confirmation prompts are the only safety gate in front of it.
-- **QR payment payload shape** — `checkout.find_qr_payload()`'s list of
-  likely field names is an educated guess; generating a real QR requires
-  actually calling `place_food_order`, which hasn't been done. First real
-  QR order will confirm or correct it.
+- **`place_food_order` (COD path)** — the QR path is confirmed live (see
+  above); COD's `paymentMethod="Cash"` is fixed the same way but hasn't
+  been independently confirmed by an actual completed COD order.
+- **QR payload field name** — confirmed live that one of
+  `checkout.find_qr_payload()`'s candidate keys does match a real
+  response (it found a genuine UPI string that rendered as a working QR),
+  but the exact key wasn't logged at the time, so the list stays a
+  superset rather than narrowing to one confirmed name.
 - **Active-order tracking shape** — `track_food_order` has only been tested
   against already-delivered orders; the terminal-status phrasing in
   `tracking.py` is a best-effort guess pending a real in-flight order.

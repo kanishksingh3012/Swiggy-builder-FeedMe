@@ -157,9 +157,21 @@ guesses:
   human-readable `title` (e.g. `"SPECIALS"`), not its `id` UUID. Its own
   terms state it can only be applied once per 2 hours per restaurant —
   a real, non-monetary cost, which is why it wasn't tested more than once.
-- `place_food_order` remains deliberately never called live — the CLI's
-  confirmation prompts (item, then payment method) are the only gate in
-  front of it.
+- `place_food_order` was deliberately never called live until the
+  requester chose to run the full CLI flow for real (2026-08-21). Two
+  attempts failed safely (no order placed either time) and directly
+  revealed the fix each time: first `paymentMethodId` → `paymentMethod`
+  (the server's own error named the correct argument), then the
+  argument's value needed to be a broad category ("Cash"/"UPI"), not the
+  option's own id ("COD"/"PayWithQR") — the server's error for this one
+  literally said `Use "UPI" with intentApp/generateUPIQR for UPI
+  payments, or "Cash" for cash on delivery.` A third attempt with both
+  fixes applied succeeded: a real order was placed via QR
+  (`paymentMethod="UPI"`, `generateUPIQR=True`), the response contained a
+  genuine UPI payment string that `find_qr_payload()` located and
+  rendered as a QR, and scanning it with a phone camera correctly opened
+  UPI payment apps. The COD path (`paymentMethod="Cash"`) is fixed
+  identically but not yet independently confirmed by a completed order.
 
 `search_restaurants` and `get_restaurant_menu` were also live-verified
 (2026-08-21) — the latter nests items under `categories[].items` rather
@@ -167,5 +179,6 @@ than a flat `items` list, unlike `search_menu`.
 
 Wire-format/shape assumptions still resting on inference rather than a
 live call: an *active* order's `track_food_order` shape (only "nothing
-to track" was observed, since no in-flight order existed to test
-against), and `report_error`.
+to track" was observed against already-delivered orders — a real
+in-flight order exists now for the first time, so this is next to
+confirm if the requester wants to track it), and `report_error`.

@@ -16,6 +16,15 @@ rather than ever being silently preferred, because unlike an app
 handoff it's a single scan-and-pay, not a full app authorization flow.
 This is a real, intentional narrowing of the original "no QR, ever"
 claim — see README for the current framing.
+
+place_food_order itself is CONFIRMED LIVE end-to-end (2026-08-21) for
+the QR path: paymentMethod="UPI" + generateUPIQR=True (fixed after two
+real failed attempts — see checkout()'s docstring for what those
+attempts revealed) produced a real order with a genuine, scannable UPI
+QR code — confirmed by actually scanning it with a phone camera, which
+correctly opened UPI payment apps. The COD path (paymentMethod="Cash")
+is fixed the same way but not yet independently confirmed by a
+completed live order.
 """
 
 from __future__ import annotations
@@ -37,10 +46,14 @@ _ALL_ZERO_PHONE_TOKENS = {t for tokens in ZERO_PHONE_ALIASES.values() for t in t
 
 QR_ALIASES = {"qr", "paywithqr", "pay_with_qr", "scan_and_pay", "scanandpay"}
 
-# Real, likely-looking keys for a QR payload in place_food_order's
-# response — UNVERIFIED, since generating one means actually calling
-# place_food_order, which has never been done live. First real QR order
-# will confirm/correct this list.
+# Likely keys for a QR payload in place_food_order's response.
+# CONFIRMED LIVE (2026-08-21): one of these actually matched a real
+# order response — find_qr_payload() found a genuine UPI payment
+# string, it rendered as a valid QR, and scanning it with a phone
+# camera correctly opened UPI payment apps. Which exact key it was
+# wasn't captured (the response wasn't logged at the time), so the
+# full list stays as a superset rather than narrowing to one name —
+# still safe, just not maximally precise.
 _LIKELY_QR_PAYLOAD_KEYS = (
     "qrCode",
     "qrCodeUrl",
