@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 
 import typer
 from rich.console import Console
@@ -31,16 +32,12 @@ async def _ensure_authenticated() -> None:
         await auth.login()
 
 
-def _select_item(items: list[MenuItem]) -> MenuItem | None:
-    """Show the results table with index numbers and require an
-    explicit pick before anything touches the cart. Returns None if the
-    user cancels (empty input or 'q') — nothing gets ordered on your
-    behalf."""
+def _print_items_table(items: list[MenuItem]) -> None:
     table = Table(title="Results — pick one")
     table.add_column("#")
     table.add_column("Item")
     table.add_column("Restaurant")
-    table.add_column("Rating")
+    table.add_column("Dish rating")
     table.add_column("Price")
     table.add_column("ETA (min)")
     for idx, item in enumerate(items, start=1):
@@ -54,18 +51,50 @@ def _select_item(items: list[MenuItem]) -> MenuItem | None:
         )
     console.print(table)
 
-    raw = typer.prompt(f"Pick an item [1-{len(items)}] (or 'q' to cancel)", default="q")
-    if raw.strip().lower() in ("q", ""):
-        return None
-    try:
-        choice = int(raw)
-    except ValueError:
-        console.print("[red]Not a number — cancelling.[/]")
-        return None
-    if not (1 <= choice <= len(items)):
-        console.print(f"[red]{choice} is out of range — cancelling.[/]")
-        return None
-    return items[choice - 1]
+
+async def _select_item(
+    items: list[MenuItem],
+    has_more: bool,
+    fetch_more: Callable[[], Awaitable[tuple[list[MenuItem], bool]]],
+    *,
+    fastest: bool = False,
+) -> MenuItem | None:
+    """Show the results table with index numbers and require an
+    explicit pick before anything touches the cart. Returns None if the
+    user cancels (empty input or 'q') — nothing gets ordered on your
+    behalf. 'Dish rating' is per-item (confirmed live: two dishes from
+    the same restaurant can show different ratings), not the
+    restaurant's overall rating. search_menu is paginated (10/page,
+    confirmed live) — 'm' fetches and appends the next page rather than
+    silently hiding the rest of the results."""
+    while True:
+        _print_items_table(items)
+        prompt = f"Pick an item [1-{len(items)}]"
+        if has_more:
+            prompt += ", 'm' for more results"
+        prompt += " (or 'q' to cancel)"
+        raw = typer.prompt(prompt, default="q")
+        choice_raw = raw.strip().lower()
+
+        if choice_raw in ("q", ""):
+            return None
+        if choice_raw == "m":
+            if not has_more:
+                console.print("[yellow]No more results.[/]")
+                continue
+            new_items, has_more = await fetch_more()
+            items = search.filter_items(items + new_items, fastest=fastest)
+            continue
+
+        try:
+            choice = int(raw)
+        except ValueError:
+            console.print("[red]Not a number — cancelling.[/]")
+            return None
+        if not (1 <= choice <= len(items)):
+            console.print(f"[red]{choice} is out of range — cancelling.[/]")
+            return None
+        return items[choice - 1]
 
 
 def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None:
@@ -115,14 +144,27 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             return
         address_id = addresses[0].id
 
-        items = await search.discover(
+        items, has_more, next_offset = await search.discover(
             client, query, address_id=address_id, max_price=max_price, fastest=fastest
         )
         if not items:
             console.print("[yellow]No menu items found for that query.[/]")
             return
 
-        chosen = _select_item(items)
+        async def fetch_more() -> tuple[list[MenuItem], bool]:
+            nonlocal next_offset
+            more_items, more_has_more, more_next_offset = await search.discover(
+                client,
+                query,
+                address_id=address_id,
+                offset=next_offset or 0,
+                max_price=max_price,
+                fastest=False,  # sorting is re-applied over the combined list below, not per-page
+            )
+            next_offset = more_next_offset
+            return more_items, more_has_more
+
+        chosen = await _select_item(items, has_more, fetch_more, fastest=fastest)
         if chosen is None:
             console.print("[yellow]Cancelled — nothing added to cart.[/]")
             return

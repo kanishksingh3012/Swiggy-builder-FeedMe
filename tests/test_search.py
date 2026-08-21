@@ -44,11 +44,12 @@ async def test_discover_enriches_items_with_restaurant_eta(monkeypatch):
     # restaurant-level ETA, matched by restaurant_id.
     import feedme.search as search_mod
 
-    async def fake_search_menu(client, query, address_id=None):
-        return [
+    async def fake_search_menu(client, query, address_id=None, offset=0):
+        items = [
             MenuItem(item_id="i1", price=100, restaurant_id="r1"),
             MenuItem(item_id="i2", price=100, restaurant_id="r2"),
         ]
+        return items, False, None
 
     async def fake_search_restaurants(client, query, address_id=None):
         return [Restaurant(id="r1", eta_minutes=25)]
@@ -56,7 +57,9 @@ async def test_discover_enriches_items_with_restaurant_eta(monkeypatch):
     monkeypatch.setattr(search_mod, "search_menu", fake_search_menu)
     monkeypatch.setattr(search_mod, "search_restaurants", fake_search_restaurants)
 
-    items = await discover(None, "pizza")
+    items, has_more, next_offset = await discover(None, "pizza")
     by_id = {i.item_id: i for i in items}
     assert by_id["i1"].eta_minutes == 25
     assert by_id["i2"].eta_minutes is None
+    assert has_more is False
+    assert next_offset is None

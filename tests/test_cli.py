@@ -33,12 +33,15 @@ def _patch_pipeline(
 
     monkeypatch.setattr(search, "get_addresses", fake_get_addresses)
 
-    async def fake_discover(client, query, *, address_id=None, max_price=None, fastest=False):
-        return [
+    async def fake_discover(
+        client, query, *, address_id=None, offset=0, max_price=None, fastest=False
+    ):
+        items = [
             MenuItem(
                 item_id="i1", name="Chicken Bowl", price=350, eta_minutes=20, restaurant_id="r1"
             )
         ]
+        return items, False, None
 
     monkeypatch.setattr(search, "discover", fake_discover)
 

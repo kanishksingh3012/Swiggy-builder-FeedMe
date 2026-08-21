@@ -22,11 +22,16 @@ async def get_addresses(client: MCPClient) -> list[Address]:
 
 
 async def search_menu(
-    client: MCPClient, query: str, address_id: str | None = None
-) -> list[MenuItem]:
-    result = await client.call_tool("search_menu", query=query, addressId=address_id)
-    items = structured_content(result).get("items", [])
-    return [MenuItem.model_validate(i) for i in items]
+    client: MCPClient, query: str, address_id: str | None = None, offset: int = 0
+) -> tuple[list[MenuItem], bool, int | None]:
+    """Returns (items, has_more, next_offset). Confirmed live: search_menu
+    is paginated (10 items/page) and supports an `offset` argument —
+    a real query can have 100+ total matches with only the first page
+    shown by default."""
+    result = await client.call_tool("search_menu", query=query, addressId=address_id, offset=offset)
+    content = structured_content(result)
+    items = [MenuItem.model_validate(i) for i in content.get("items", [])]
+    return items, bool(content.get("hasMore", False)), content.get("nextOffset")
 
 
 async def search_restaurants(
@@ -72,11 +77,19 @@ async def discover(
     query: str,
     *,
     address_id: str | None = None,
+    offset: int = 0,
     max_price: float | None = None,
     fastest: bool = False,
     min_protein: float | None = None,
-) -> list[MenuItem]:
-    items = await search_menu(client, query, address_id=address_id)
+) -> tuple[list[MenuItem], bool, int | None]:
+    """One page of search results, filtered, with real restaurant ETA
+    merged in. Returns (items, has_more, next_offset) — pass next_offset
+    back in as `offset` to fetch the next page (search_menu is
+    paginated, confirmed live: a query can have 100+ total matches with
+    only 10 returned per call)."""
+    items, has_more, next_offset = await search_menu(
+        client, query, address_id=address_id, offset=offset
+    )
 
     # search_menu items never carry eta_minutes — real per-item ETA
     # doesn't exist there (confirmed live). Restaurant-level ETA does
@@ -90,4 +103,5 @@ async def discover(
         if item.eta_minutes is None and item.restaurant_id in eta_by_restaurant:
             item.eta_minutes = eta_by_restaurant[item.restaurant_id]
 
-    return filter_items(items, max_price=max_price, fastest=fastest, min_protein=min_protein)
+    filtered = filter_items(items, max_price=max_price, fastest=fastest, min_protein=min_protein)
+    return filtered, has_more, next_offset
