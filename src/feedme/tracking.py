@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+from rich.console import Console
 from rich.status import Status
 
 from feedme.mcp_client import MCPClient, structured_content
@@ -103,26 +104,57 @@ def _is_terminal(status: TrackingStatus) -> bool:
     return value in TERMINAL_STATUSES
 
 
+TRACK_ORDER_DEFAULT_TIMEOUT = 1800.0
+
+
+def _final_message(status: TrackingStatus, *, timed_out: bool) -> tuple[str, str]:
+    """(message, rich style) for the line printed once tracking stops."""
+    value = (status.status or status.stage or "").upper()
+    if value == "DELIVERED":
+        return "✅ Order delivered!", "bold green"
+    if value == "CANCELLED":
+        return "❌ Order cancelled.", "bold red"
+    if value == "FAILED":
+        return "❌ Order failed.", "bold red"
+    if timed_out:
+        minutes = int(TRACK_ORDER_DEFAULT_TIMEOUT // 60)
+        return (
+            f"⏱ Stopped tracking after {minutes} min without a final status — "
+            "check the Swiggy app.",
+            "yellow",
+        )
+    return "Stopped tracking.", "yellow"
+
+
 async def track_order(
     client: MCPClient,
     order_id: str,
     *,
     poll_interval: float = 5.0,
-    timeout: float = 1800.0,
+    timeout: float = TRACK_ORDER_DEFAULT_TIMEOUT,
     render: bool = True,
 ) -> TrackingStatus:
     deadline = time.monotonic() + timeout
     status_widget = Status("Tracking order...") if render else None
     if status_widget is not None:
         status_widget.start()
+    timed_out = False
     try:
         while True:
             status = await get_delivery_status(client, order_id)
             if status_widget is not None:
                 status_widget.update(_status_line(status))
-            if _is_terminal(status) or time.monotonic() >= deadline:
-                return status
+            if _is_terminal(status):
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
             await asyncio.sleep(poll_interval)
     finally:
         if status_widget is not None:
             status_widget.stop()
+
+    if render:
+        message, style = _final_message(status, timed_out=timed_out)
+        Console().print(f"[{style}]{message}[/]")
+    return status

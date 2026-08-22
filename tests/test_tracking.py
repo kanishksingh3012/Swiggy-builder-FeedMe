@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from feedme.tracking import _is_terminal, _status_line, track_order
+from feedme.tracking import _final_message, _is_terminal, _status_line, track_order
 from models import TrackingStatus
 
 
@@ -68,3 +68,37 @@ async def test_track_order_stops_at_timeout(monkeypatch):
 
     result = await track_order(None, "o1", poll_interval=0, timeout=0, render=False)
     assert result.status == "PLACED"
+
+
+def test_final_message_delivered():
+    status = TrackingStatus(order_id="o1", status="DELIVERED")
+    message, style = _final_message(status, timed_out=False)
+    assert "delivered" in message.lower()
+    assert style == "bold green"
+
+
+def test_final_message_cancelled():
+    status = TrackingStatus(order_id="o1", status="CANCELLED")
+    message, style = _final_message(status, timed_out=False)
+    assert "cancelled" in message.lower()
+    assert style == "bold red"
+
+
+def test_final_message_timed_out_without_terminal_status():
+    status = TrackingStatus(order_id="o1", status="OUT_FOR_DELIVERY")
+    message, style = _final_message(status, timed_out=True)
+    assert "Stopped tracking" in message
+    assert style == "yellow"
+
+
+async def test_track_order_prints_delivered_message(monkeypatch, capsys):
+    async def fake_get_delivery_status(client, order_id):
+        return TrackingStatus(order_id=order_id, status="DELIVERED")
+
+    import feedme.tracking as tracking_mod
+
+    monkeypatch.setattr(tracking_mod, "get_delivery_status", fake_get_delivery_status)
+
+    await track_order(None, "o1", poll_interval=0, render=True)
+    captured = capsys.readouterr()
+    assert "Order delivered" in captured.out
