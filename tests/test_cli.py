@@ -54,7 +54,8 @@ def _patch_pipeline(
         return None
 
     async def fake_add_items(client, address_id, items):
-        return Cart(address_id=address_id, subtotal=350)
+        pricing = {"item_total": 350, "delivery_charge": 20, "taxes_and_charges": 30, "to_pay": 400}
+        return Cart(address_id=address_id, subtotal=350, data={"pricing": pricing})
 
     async def fake_get_cart(client, address_id):
         return Cart(address_id=address_id, subtotal=350)
@@ -102,6 +103,31 @@ def test_cli_runs_full_pipeline_after_confirming_item(monkeypatch):
     result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n")
     assert result.exit_code == 0
     assert "Chicken Bowl" in result.stdout
+    assert "To pay" in result.stdout
+    assert "400" in result.stdout
+
+
+def test_cli_load_more_fetches_several_pages_per_press(monkeypatch):
+    _patch_pipeline(monkeypatch)
+    calls = {"n": 0}
+
+    async def fake_discover(
+        client, query, *, address_id=None, offset=0, max_price=None, fastest=False
+    ):
+        calls["n"] += 1
+        item = MenuItem(item_id=f"i{calls['n']}", name=f"Item {calls['n']}", price=100)
+        # has_more True for the first 3 calls (initial page 0-2 within
+        # fetch_more's batch), False after — confirms fetch_more loops
+        # multiple pages per 'm' press rather than stopping at one.
+        return [item], calls["n"] <= 3, calls["n"]
+
+    monkeypatch.setattr(search, "discover", fake_discover)
+
+    result = runner.invoke(cli.app, ["chicken bowl"], input="1\nm\nq\n")
+    assert result.exit_code == 0
+    # 1 initial call + up to PAGES_PER_LOAD_MORE(5) more from one 'm' press,
+    # capped by has_more turning False after call 4 (3 more-pages + initial)
+    assert calls["n"] >= 4
 
 
 def test_cli_prompts_for_payment_method_when_multiple_available(monkeypatch):

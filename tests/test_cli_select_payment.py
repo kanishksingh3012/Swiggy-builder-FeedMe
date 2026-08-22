@@ -37,3 +37,37 @@ def test_multiple_options_cancel_with_q(monkeypatch):
 def test_multiple_options_out_of_range_cancels(monkeypatch):
     monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: "99")
     assert _select_payment_option(_options()) is None
+
+
+def _qr_option() -> PaymentOption:
+    return PaymentOption(method_id="PayWithQR", method_type="UPI", display_name="Pay with QR")
+
+
+def test_sole_qr_option_still_requires_explicit_confirmation(monkeypatch):
+    # Confirmed live 2026-08-21: the old code auto-returned a sole option
+    # with no prompt at all, regardless of type. A test script with too
+    # few piped inputs sailed through this exact path when QR happened
+    # to be the only option, generating a real UPI payment request with
+    # nobody confirming anything. QR must always ask, even alone.
+    monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: "y")
+    result = _select_payment_option([_qr_option()])
+    assert result is not None
+    assert result.method_id == "PayWithQR"
+
+
+def test_sole_qr_option_declined_returns_none(monkeypatch):
+    monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: "n")
+    assert _select_payment_option([_qr_option()]) is None
+
+
+def test_sole_qr_option_prompt_defaults_to_no(monkeypatch):
+    captured = {}
+
+    def fake_prompt(*args, **kwargs):
+        captured.update(kwargs)
+        return kwargs.get("default", "")
+
+    monkeypatch.setattr("feedme.cli.typer.prompt", fake_prompt)
+    result = _select_payment_option([_qr_option()])
+    assert captured.get("default") == "n"
+    assert result is None

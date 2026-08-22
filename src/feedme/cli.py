@@ -11,7 +11,7 @@ from rich.table import Table
 
 from feedme import auth, cart, checkout, search, tracking
 from feedme.mcp_client import MCPClient
-from models import Address, MenuItem, PaymentOption
+from models import Address, Cart, MenuItem, PaymentOption
 
 # `main` is registered via @app.command() (not @app.callback()): a Typer
 # app whose only entrypoint is a single @app.command() collapses to a
@@ -25,6 +25,10 @@ app = typer.Typer(name="feedme", help="Zero-phone food ordering from the termina
 
 console = Console()
 
+# How many search_menu pages (10 items each) 'm' fetches per press. See
+# fetch_more()'s docstring in run_pipeline for why this isn't 1.
+PAGES_PER_LOAD_MORE = 5
+
 
 async def _ensure_authenticated() -> None:
     creds = auth.load_credentials()
@@ -33,12 +37,18 @@ async def _ensure_authenticated() -> None:
 
 
 def _print_items_table(items: list[MenuItem]) -> None:
+    # "Base price" (not "Price"): Swiggy has no per-item tax-inclusive
+    # figure anywhere — delivery charge and taxes are computed against
+    # the whole cart once items are actually added, not per dish (see
+    # _print_cart_summary for the real final numbers). Labeling this
+    # "Price" invited exactly the "is this the final price?" question
+    # that came up — it isn't, and can't be, until there's a cart.
     table = Table(title="Results — pick one")
     table.add_column("#")
     table.add_column("Item")
     table.add_column("Restaurant")
     table.add_column("Rating")
-    table.add_column("Price")
+    table.add_column("Base price")
     table.add_column("ETA (min)")
     for idx, item in enumerate(items, start=1):
         table.add_row(
@@ -129,7 +139,7 @@ async def _select_more_items(
         table = Table(title=f"{restaurant_name} — add another dish?")
         table.add_column("#")
         table.add_column("Item")
-        table.add_column("Price")
+        table.add_column("Base price")
         table.add_column("Veg")
         for idx, item in enumerate(menu, start=1):
             marker = " (added)" if item.item_id in picked_ids else ""
@@ -164,21 +174,60 @@ async def _select_more_items(
         console.print(f"[green]Added {item.name or item.item_id}.[/]")
 
 
+def _print_cart_summary(cart_obj: Cart) -> None:
+    """The real, final numbers — item total, delivery, taxes, and what
+    you'll actually pay — shown once before payment selection. Sourced
+    from Cart.data.pricing (confirmed live 2026-08-21: item_total,
+    delivery_charge, taxes_and_charges, to_pay) since there's no
+    per-item tax-inclusive figure anywhere in Swiggy's API — tax and
+    delivery are computed against the whole cart, not per dish, so this
+    is the earliest point a "final price" genuinely exists at all."""
+    pricing = (cart_obj.data or {}).get("pricing")
+    if not pricing:
+        return
+    offers = (cart_obj.data or {}).get("offers") or {}
+
+    table = Table(title="Order summary")
+    table.add_column("")
+    table.add_column("", justify="right")
+    table.add_row("Item total", f"₹{pricing.get('item_total', '-')}")
+    table.add_row("Delivery charge", f"₹{pricing.get('delivery_charge', '-')}")
+    if offers.get("coupon_discount"):
+        table.add_row("Coupon discount", f"-₹{offers['coupon_discount']}")
+    table.add_row("Taxes & charges", f"₹{pricing.get('taxes_and_charges', '-')}")
+    table.add_row("[bold]To pay[/]", f"[bold]₹{pricing.get('to_pay', '-')}[/]")
+    console.print(table)
+
+
 def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None:
     """Same confirm-before-acting principle as _select_item, applied to
-    payment method. If there's only one usable option (COD, the common
-    case — no Swiggy Money on the test account), there's no actual
-    decision to make, so it's used without prompting rather than adding
-    a confirmation with nothing to confirm. A real choice between
-    options gets the same explicit-pick treatment as menu items.
+    payment method. If the sole option is zero-phone (COD/Swiggy Money —
+    the common case), it's used without prompting since there's no real
+    decision to make and no consequence to auto-picking it. QR is
+    different and always requires an explicit yes, even as the only
+    option: unlike COD, generating one is a real action (it creates a
+    genuine UPI payment request) — confirmed live 2026-08-21 when a test
+    script with too few piped inputs sailed through an unprompted
+    single-QR-option case and generated a real one with nobody
+    confirming anything. COD auto-picking is still safe since nothing
+    is requested/charged by the pick itself.
 
     The option set here is checkout.get_available_payment_options() —
     zero-phone options (COD/Swiggy Money) plus QR, never full mobile-app
     UPI handoffs. QR is a deliberate, explicit exception to "zero-phone"
     (see checkout.py's module docstring), so it's always labeled as such
     here rather than blended in indistinguishably."""
-    if len(options) == 1:
+    if len(options) == 1 and not checkout._is_qr(options[0]):
         return options[0]
+
+    if len(options) == 1:
+        only = options[0]
+        console.print(
+            f"[cyan]Only payment option available: {only.display_name or only.method_id} "
+            "(Mobile, payment confirmation only).[/]"
+        )
+        raw = typer.prompt("Generate a payment QR? [y/N]", default="n")
+        return only if raw.strip().lower() in ("y", "yes") else None
 
     table = Table(title="Payment options — pick one")
     table.add_column("#")
@@ -285,17 +334,30 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             return
 
         async def fetch_more() -> tuple[list[MenuItem], bool]:
+            # Fetches several pages per 'm' press, not just one. A real
+            # match can sit ~50 results deep even after the relevance
+            # boost (confirmed live: 56 of 60 results for a 2-word query
+            # all matched, so a real item stayed buried around rank 47) —
+            # one page (10 items) per press would need ~5 presses to even
+            # fetch it. This trades a few extra API calls for far less
+            # manual paging.
             nonlocal next_offset
-            more_items, more_has_more, more_next_offset = await search.discover(
-                client,
-                query,
-                address_id=address_id,
-                offset=next_offset or 0,
-                max_price=max_price,
-                fastest=False,  # sorting is re-applied over the combined list below, not per-page
-            )
-            next_offset = more_next_offset
-            return more_items, more_has_more
+            batch: list[MenuItem] = []
+            more_has_more = True
+            for _ in range(PAGES_PER_LOAD_MORE):
+                more_items, more_has_more, more_next_offset = await search.discover(
+                    client,
+                    query,
+                    address_id=address_id,
+                    offset=next_offset or 0,
+                    max_price=max_price,
+                    fastest=False,  # sorting is re-applied over the combined list, not per-page
+                )
+                batch += more_items
+                next_offset = more_next_offset
+                if not more_has_more:
+                    break
+            return batch, more_has_more
 
         chosen = await _select_item(items, has_more, fetch_more, query=query, fastest=fastest)
         if chosen is None:
@@ -315,6 +377,7 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
         current_cart = await cart.add_items(client, address_id, order_items)
         if chosen.restaurant_id is not None:
             current_cart = await cart.apply_best_coupon(client, current_cart, chosen.restaurant_id)
+        _print_cart_summary(current_cart)
 
         try:
             payment_options = await checkout.get_available_payment_options(client)
