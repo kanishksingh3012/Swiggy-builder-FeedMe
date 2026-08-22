@@ -45,6 +45,21 @@ async def _ensure_authenticated() -> None:
         await auth.login()
 
 
+def _print_actions(*actions: tuple[str, str]) -> None:
+    """A short, scannable legend of the available inputs — one action
+    per line, key left-aligned — shown right before a prompt. Direct
+    feedback: cramming every option into one run-on prompt sentence
+    ("add a dish [1-5], 'm' for more dishes, 'r<#>' to remove..., 'done'
+    to continue", all in one breath) was confusing, even though the
+    underlying flow was fine. This is a presentation fix, not a logic
+    one — every picker below now follows the same pattern: table (data)
+    -> action legend (choices) -> a short, generic prompt."""
+    console.print()
+    for key, desc in actions:
+        console.print(f"  [bold cyan]{key:<10}[/][dim]{desc}[/]")
+    console.print()
+
+
 def _print_items_table(items: list[MenuItem]) -> None:
     # "Base price" (not "Price"): Swiggy has no per-item tax-inclusive
     # figure anywhere — delivery charge and taxes are computed against
@@ -104,11 +119,12 @@ async def _select_item(
         window = items[:shown]
         _print_items_table(window)
         more_available = shown < len(items) or has_more
-        prompt = f"Pick an item [1-{len(window)}]"
+        actions = [(f"1-{len(window)}", "pick this item")]
         if more_available:
-            prompt += ", 'm' for more results"
-        prompt += " (or 'q' to cancel)"
-        raw = typer.prompt(prompt, default="q")
+            actions.append(("m", "show more results"))
+        actions.append(("q", "cancel"))
+        _print_actions(*actions)
+        raw = typer.prompt("Your choice", default="q")
         choice_raw = raw.strip().lower()
 
         if choice_raw in ("q", ""):
@@ -194,14 +210,16 @@ async def _build_order_items(
                 )
             console.print(table)
 
-        prompt_parts = []
+        actions = []
         if window:
-            prompt_parts.append(f"add a dish [1-{len(window)}]")
+            actions.append((f"1-{len(window)}", "add a dish to your order"))
         if shown < len(menu):
-            prompt_parts.append("'m' for more dishes")
-        prompt_parts.append("'r<#>' to remove from your order (e.g. 'r2')")
-        prompt_parts.append("'done' to continue")
-        raw = typer.prompt(", ".join(prompt_parts).capitalize(), default="done")
+            actions.append(("m", "show more dishes"))
+        if order:
+            actions.append(("r<#>", "remove an item, e.g. 'r2'"))
+        actions.append(("done", "continue to checkout"))
+        _print_actions(*actions)
+        raw = typer.prompt("Your choice", default="done")
         choice_raw = raw.strip().lower()
 
         if choice_raw in ("done", "q", ""):
@@ -290,7 +308,8 @@ def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None
             f"[cyan]Only payment option available: {only.display_name or only.method_id} "
             "(Mobile, payment confirmation only).[/]"
         )
-        raw = typer.prompt("Generate a payment QR? [y/N]", default="n")
+        _print_actions(("y", "generate the QR and proceed"), ("n", "cancel (default)"))
+        raw = typer.prompt("Your choice", default="n")
         return only if raw.strip().lower() in ("y", "yes") else None
 
     table = Table(title="Payment options — pick one")
@@ -302,7 +321,8 @@ def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None
         table.add_row(str(idx), option.display_name or option.method_id, kind)
     console.print(table)
 
-    raw = typer.prompt(f"Pick a payment method [1-{len(options)}] (or 'q' to cancel)", default="q")
+    _print_actions((f"1-{len(options)}", "pick a payment method"), ("q", "cancel"))
+    raw = typer.prompt("Your choice", default="q")
     if raw.strip().lower() in ("q", ""):
         return None
     try:
@@ -355,7 +375,8 @@ def _select_address(addresses: list[Address]) -> Address | None:
         )
     console.print(table)
 
-    raw = typer.prompt(f"Deliver to [1-{len(top)}] (or 'q' to cancel)", default="1")
+    _print_actions((f"1-{len(top)}", "deliver here"), ("q", "cancel"))
+    raw = typer.prompt("Your choice", default="1")
     if raw.strip().lower() in ("q", ""):
         return None
     try:
