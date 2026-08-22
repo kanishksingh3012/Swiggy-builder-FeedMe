@@ -45,6 +45,11 @@ def _patch_pipeline(
 
     monkeypatch.setattr(search, "discover", fake_discover)
 
+    async def fake_get_restaurant_menu(client, restaurant_id, address_id):
+        return []
+
+    monkeypatch.setattr(search, "get_restaurant_menu", fake_get_restaurant_menu)
+
     async def fake_flush_cart(client, address_id) -> None:
         return None
 

@@ -99,6 +99,66 @@ async def _select_item(
         return items[choice - 1]
 
 
+async def _select_more_items(
+    client: MCPClient, address_id: str, restaurant_id: str, restaurant_name: str
+) -> list[MenuItem]:
+    """After the first dish is picked, loop offering more dishes from
+    that SAME restaurant — Swiggy carts can't mix restaurants
+    (cart.add_items() enforces this), so "add another dish" only makes
+    sense scoped to one restaurant's full menu, not the original search
+    results (which span many restaurants). Browses via
+    search.get_restaurant_menu() rather than re-filtering the original
+    search, since you'd often want something the original query didn't
+    match (e.g. searched "shawarma", also want a drink from the same
+    place). Returns the extra items picked (possibly empty) — the
+    caller combines these with the first pick into one add_items() call
+    so quantities/coupons are computed against the whole order, not
+    added piecemeal."""
+    menu = await search.get_restaurant_menu(client, restaurant_id, address_id)
+    if not menu:
+        return []
+
+    picked: list[MenuItem] = []
+    picked_ids: set[str] = set()
+    while True:
+        table = Table(title=f"{restaurant_name} — add another dish?")
+        table.add_column("#")
+        table.add_column("Item")
+        table.add_column("Price")
+        table.add_column("Veg")
+        for idx, item in enumerate(menu, start=1):
+            marker = " (added)" if item.item_id in picked_ids else ""
+            table.add_row(
+                str(idx),
+                (item.name or item.item_id) + marker,
+                str(item.price) if item.price is not None else "-",
+                "Veg" if item.veg else ("Non-veg" if item.veg is False else "-"),
+            )
+        console.print(table)
+
+        raw = typer.prompt(f"Add a dish [1-{len(menu)}], or 'done' to continue", default="done")
+        choice_raw = raw.strip().lower()
+        if choice_raw in ("done", "q", ""):
+            return picked
+
+        try:
+            choice = int(raw)
+        except ValueError:
+            console.print("[red]Not a number — try again.[/]")
+            continue
+        if not (1 <= choice <= len(menu)):
+            console.print(f"[red]{choice} is out of range — try again.[/]")
+            continue
+
+        item = menu[choice - 1]
+        if item.item_id in picked_ids:
+            console.print(f"[yellow]{item.name or item.item_id} is already added.[/]")
+            continue
+        picked.append(item)
+        picked_ids.add(item.item_id)
+        console.print(f"[green]Added {item.name or item.item_id}.[/]")
+
+
 def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None:
     """Same confirm-before-acting principle as _select_item, applied to
     payment method. If there's only one usable option (COD, the common
@@ -237,8 +297,17 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             console.print("[yellow]Cancelled — nothing added to cart.[/]")
             return
 
+        order_items = [chosen]
+        if chosen.restaurant_id is not None:
+            restaurant_name = chosen.restaurant_name or "this restaurant"
+            order_items += await _select_more_items(
+                client, address_id, chosen.restaurant_id, restaurant_name
+            )
+        if len(order_items) > 1:
+            console.print(f"[cyan]{len(order_items)} items in this order.[/]")
+
         await cart.flush_cart(client, address_id)
-        current_cart = await cart.add_items(client, address_id, [chosen])
+        current_cart = await cart.add_items(client, address_id, order_items)
         if chosen.restaurant_id is not None:
             current_cart = await cart.apply_best_coupon(client, current_cart, chosen.restaurant_id)
 

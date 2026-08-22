@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from feedme.search import discover, filter_items
+from feedme.search import discover, filter_items, get_restaurant_menu
 from models import MenuItem, Restaurant
 
 
@@ -63,3 +63,29 @@ async def test_discover_enriches_items_with_restaurant_eta(monkeypatch):
     assert by_id["i2"].eta_minutes is None
     assert has_more is False
     assert next_offset is None
+
+
+class _FakeClient:
+    async def call_tool(self, tool_name, **kwargs):
+        return {
+            "structuredContent": {
+                "restaurant": {"id": "r1", "name": "Test Place", "avgRating": 4.5},
+                "categories": [
+                    {"items": [{"id": "i1", "name": "Dish A", "price": 100}]},
+                    {"items": [{"id": "i2", "name": "Dish B", "price": 200}]},
+                ],
+            }
+        }
+
+
+async def test_get_restaurant_menu_backfills_restaurant_id_onto_items():
+    # Confirmed live 2026-08-21: unlike search_menu, get_restaurant_menu's
+    # items carry no restaurant_id of their own — only the top-level
+    # `restaurant` object has one. Without backfilling it, cart.add_items()
+    # can't tell the server which restaurant the order is for, and
+    # place_food_order-adjacent calls fail with "restaurantId is required"
+    # (a real live failure this fix resolves).
+    items = await get_restaurant_menu(_FakeClient(), "r1", "addr1")
+    assert all(i.restaurant_id == "r1" for i in items)
+    assert all(i.restaurant_name == "Test Place" for i in items)
+    assert all(i.restaurant_rating == 4.5 for i in items)

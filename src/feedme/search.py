@@ -45,12 +45,28 @@ async def search_restaurants(
 async def get_restaurant_menu(
     client: MCPClient, restaurant_id: str, address_id: str
 ) -> list[MenuItem]:
+    """Confirmed live bug (2026-08-21): unlike search_menu, items here
+    carry NO restaurant_id of their own at all — only the top-level
+    `restaurant` object has one. cart.add_items() derives which
+    restaurant to send from each item's restaurant_id, so without this
+    backfill it silently ends up with none and place_food_order-adjacent
+    calls fail with "restaurantId is required". Backfilling from the
+    restaurant_id parameter (which the caller already knows, since it's
+    required to make this call at all) rather than trying to trust
+    anything per-item."""
     result = await client.call_tool(
         "get_restaurant_menu", restaurantId=restaurant_id, addressId=address_id
     )
-    categories = structured_content(result).get("categories", [])
-    items = [i for category in categories for i in category.get("items", [])]
-    return [MenuItem.model_validate(i) for i in items]
+    content = structured_content(result)
+    restaurant = content.get("restaurant", {})
+    categories = content.get("categories", [])
+    raw_items = [i for category in categories for i in category.get("items", [])]
+    items = [MenuItem.model_validate(i) for i in raw_items]
+    for item in items:
+        item.restaurant_id = restaurant_id
+        item.restaurant_name = item.restaurant_name or restaurant.get("name")
+        item.restaurant_rating = item.restaurant_rating or restaurant.get("avgRating")
+    return items
 
 
 def filter_items(
