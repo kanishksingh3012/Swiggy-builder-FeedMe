@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from feedme.cli import _select_more_items
+from feedme.cli import _build_order_items
 from models import MenuItem
+
+
+def _first() -> MenuItem:
+    return MenuItem(item_id="i0", name="Margherita Pizza", price=200, restaurant_id="r1")
 
 
 def _menu() -> list[MenuItem]:
@@ -11,42 +15,95 @@ def _menu() -> list[MenuItem]:
     ]
 
 
-async def test_select_more_items_empty_menu_returns_immediately(monkeypatch):
+async def test_build_order_items_empty_menu_keeps_just_the_first_item(monkeypatch):
     async def fake_get_restaurant_menu(client, restaurant_id, address_id):
         return []
 
     monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
-    result = await _select_more_items(None, "addr1", "r1", "Test Restaurant")
-    assert result == []
+    monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: "done")
+    result = await _build_order_items(None, "addr1", _first())
+    assert [i.item_id for i in result] == ["i0"]
 
 
-async def test_select_more_items_done_immediately_adds_nothing(monkeypatch):
+async def test_build_order_items_done_immediately_keeps_just_the_first_item(monkeypatch):
     async def fake_get_restaurant_menu(client, restaurant_id, address_id):
         return _menu()
 
     monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
     monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: "done")
-    result = await _select_more_items(None, "addr1", "r1", "Test Restaurant")
-    assert result == []
+    result = await _build_order_items(None, "addr1", _first())
+    assert [i.item_id for i in result] == ["i0"]
 
 
-async def test_select_more_items_picks_two_dishes_then_done(monkeypatch):
+async def test_build_order_items_picks_two_more_dishes_then_done(monkeypatch):
     async def fake_get_restaurant_menu(client, restaurant_id, address_id):
         return _menu()
 
     monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
     responses = iter(["1", "2", "done"])
     monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
-    result = await _select_more_items(None, "addr1", "r1", "Test Restaurant")
-    assert [i.item_id for i in result] == ["i1", "i2"]
+    result = await _build_order_items(None, "addr1", _first())
+    assert [i.item_id for i in result] == ["i0", "i1", "i2"]
 
 
-async def test_select_more_items_rejects_duplicate_pick(monkeypatch):
+async def test_build_order_items_rejects_duplicate_pick(monkeypatch):
     async def fake_get_restaurant_menu(client, restaurant_id, address_id):
         return _menu()
 
     monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
     responses = iter(["1", "1", "done"])
     monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
-    result = await _select_more_items(None, "addr1", "r1", "Test Restaurant")
-    assert [i.item_id for i in result] == ["i1"]
+    result = await _build_order_items(None, "addr1", _first())
+    assert [i.item_id for i in result] == ["i0", "i1"]
+
+
+async def test_build_order_items_can_remove_an_added_dish(monkeypatch):
+    # Confirmed missing before this: there was no way to undo a pick at
+    # all except cancelling the whole order.
+    async def fake_get_restaurant_menu(client, restaurant_id, address_id):
+        return _menu()
+
+    monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
+    responses = iter(["1", "r2", "done"])  # add Garlic Naan, then remove it (position 2)
+    monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
+    result = await _build_order_items(None, "addr1", _first())
+    assert [i.item_id for i in result] == ["i0"]
+
+
+async def test_build_order_items_can_remove_the_first_item_too(monkeypatch):
+    # The first pick is no longer special-cased/unremovable — removing
+    # everything (including it) signals full cancellation to the caller.
+    async def fake_get_restaurant_menu(client, restaurant_id, address_id):
+        return _menu()
+
+    monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
+    responses = iter(["r1", "done"])
+    monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
+    result = await _build_order_items(None, "addr1", _first())
+    assert result == []
+
+
+async def test_build_order_items_remove_out_of_range_shows_error_and_continues(monkeypatch):
+    async def fake_get_restaurant_menu(client, restaurant_id, address_id):
+        return []
+
+    monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
+    responses = iter(["r5", "done"])
+    monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
+    result = await _build_order_items(None, "addr1", _first())
+    assert [i.item_id for i in result] == ["i0"]
+
+
+async def test_build_order_items_shows_more_dishes_only_five_at_a_time(monkeypatch):
+    menu = [MenuItem(item_id=f"m{n}", name=f"Dish {n}", price=100) for n in range(7)]
+
+    async def fake_get_restaurant_menu(client, restaurant_id, address_id):
+        return menu
+
+    monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
+    # first screen only has 5 dishes (m0-m4); picking "6" should fail
+    # until 'm' reveals the rest.
+    responses = iter(["6", "m", "6", "done"])
+    monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
+    result = await _build_order_items(None, "addr1", _first())
+    assert [i.item_id for i in result] == ["i0", "m5"]

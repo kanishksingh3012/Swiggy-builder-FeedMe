@@ -99,8 +99,9 @@ def test_cli_no_query_is_usage_error():
 
 def test_cli_runs_full_pipeline_after_confirming_item(monkeypatch):
     _patch_pipeline(monkeypatch)
-    # "1\n" confirms the address, "1\n" picks the item
-    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n")
+    # "1\n" confirms the address, "1\n" picks the item, "\n" accepts the
+    # order-builder's default ("done" — no more dishes to add/remove)
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n\n")
     assert result.exit_code == 0
     assert "Chicken Bowl" in result.stdout
     assert "To pay" in result.stdout
@@ -132,8 +133,8 @@ def test_cli_load_more_fetches_several_pages_per_press(monkeypatch):
 
 def test_cli_prompts_for_payment_method_when_multiple_available(monkeypatch):
     _patch_pipeline(monkeypatch, payment_option_count=2)
-    # "1\n" confirms the address, "1\n" picks the item, "2\n" picks the second payment method
-    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n2\n")
+    # address, item, accept order-builder default, then pick payment method 2
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n\n2\n")
     assert result.exit_code == 0
     assert "payment" in result.stdout.lower()
 
@@ -146,7 +147,7 @@ def test_cli_cancelling_payment_selection_does_not_place_order(monkeypatch):
 
     monkeypatch.setattr(checkout, "checkout", fail_if_called)
 
-    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\nq\n")
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n\nq\n")
     assert result.exit_code == 0
     assert "not placed" in result.stdout.lower()
 
@@ -180,6 +181,6 @@ def test_cli_cancelling_address_confirmation_stops_before_anything_else(monkeypa
 
 def test_cli_exits_nonzero_when_no_usable_payment_options(monkeypatch):
     _patch_pipeline(monkeypatch, zero_phone_available=False)
-    result = runner.invoke(cli.app, ["chicken bowl"], input="1\n1\n")
+    result = runner.invoke(cli.app, ["chicken bowl"], input="1\n1\n\n")
     assert result.exit_code == 1
     assert "no usable options" in result.stdout.lower()

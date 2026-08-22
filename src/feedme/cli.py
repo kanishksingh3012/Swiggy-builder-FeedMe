@@ -25,9 +25,18 @@ app = typer.Typer(name="feedme", help="Zero-phone food ordering from the termina
 
 console = Console()
 
-# How many search_menu pages (10 items each) 'm' fetches per press. See
-# fetch_more()'s docstring in run_pipeline for why this isn't 1.
+# How many search_menu pages (10 items each) 'm' fetches from the server
+# per press. See fetch_more()'s docstring in run_pipeline for why this
+# isn't 1.
 PAGES_PER_LOAD_MORE = 5
+
+# How many items are shown on screen at once. Server-side fetches (above)
+# stay bigger than this — the whole batch gets relevance-ranked together —
+# but only this many are ever displayed at a time, revealing more from the
+# already-fetched pool before going back to the server. Too many options
+# on screen at once was flagged directly as a real usability problem, not
+# just a display preference.
+RESULTS_PAGE_SIZE = 5
 
 
 async def _ensure_authenticated() -> None:
@@ -70,24 +79,33 @@ async def _select_item(
     query: str | None = None,
     fastest: bool = False,
 ) -> MenuItem | None:
-    """Show the results table with index numbers and require an
+    """Show up to RESULTS_PAGE_SIZE items at a time and require an
     explicit pick before anything touches the cart. Returns None if the
     user cancels (empty input or 'q') — nothing gets ordered on your
-    behalf. The 'Rating' column shows the restaurant's overall rating
+    behalf. Showing everything fetched at once (previously up to ~60
+    after a few 'm' presses) was flagged directly as overwhelming and
+    counterproductive — too many options defeats the point of a quick
+    terminal order. 'm' first reveals more from what's already been
+    fetched (no server call) before reaching further via fetch_more(),
+    which pulls a bigger server-side batch (PAGES_PER_LOAD_MORE pages)
+    all at once — a real match can sit far enough down the server's own
+    ranking that fetching one page at a time would need many round
+    trips (confirmed live: rank ~47 among 60 fetched for a 2-word
+    query). The 'Rating' column shows the restaurant's overall rating
     (MenuItem.restaurant_rating, filled in by search.discover() from
     search_restaurants) rather than the per-dish rating search_menu
     itself returns (MenuItem.rating — confirmed real and genuinely
-    different per dish, just not what's displayed here). search_menu is
-    paginated (10/page, confirmed live) — 'm' fetches and appends the
-    next page rather than silently hiding the rest of the results.
-    Merged results are re-ranked via search.filter_items(query=...) so
-    an exact name match pulled in by 'm' still surfaces near the top
-    rather than wherever Swiggy's own ranking placed it (confirmed live:
-    a real item ranked 51st for a 2-word query, 1st for its full name)."""
+    different per dish, just not what's displayed here). Merged results
+    are re-ranked via search.filter_items(query=...) so an exact name
+    match pulled in by 'm' still surfaces near the top rather than
+    wherever Swiggy's own ranking placed it."""
+    shown = min(RESULTS_PAGE_SIZE, len(items))
     while True:
-        _print_items_table(items)
-        prompt = f"Pick an item [1-{len(items)}]"
-        if has_more:
+        window = items[:shown]
+        _print_items_table(window)
+        more_available = shown < len(items) or has_more
+        prompt = f"Pick an item [1-{len(window)}]"
+        if more_available:
             prompt += ", 'm' for more results"
         prompt += " (or 'q' to cancel)"
         raw = typer.prompt(prompt, default="q")
@@ -96,11 +114,15 @@ async def _select_item(
         if choice_raw in ("q", ""):
             return None
         if choice_raw == "m":
+            if shown < len(items):
+                shown = min(shown + RESULTS_PAGE_SIZE, len(items))
+                continue
             if not has_more:
                 console.print("[yellow]No more results.[/]")
                 continue
             new_items, has_more = await fetch_more()
             items = search.filter_items(items + new_items, query=query, fastest=fastest)
+            shown = min(shown + RESULTS_PAGE_SIZE, len(items))
             continue
 
         try:
@@ -108,69 +130,111 @@ async def _select_item(
         except ValueError:
             console.print("[red]Not a number — cancelling.[/]")
             return None
-        if not (1 <= choice <= len(items)):
+        if not (1 <= choice <= len(window)):
             console.print(f"[red]{choice} is out of range — cancelling.[/]")
             return None
-        return items[choice - 1]
+        return window[choice - 1]
 
 
-async def _select_more_items(
-    client: MCPClient, address_id: str, restaurant_id: str, restaurant_name: str
+def _print_order_so_far(order: list[MenuItem]) -> None:
+    table = Table(title="Your order so far")
+    table.add_column("#")
+    table.add_column("Item")
+    table.add_column("Base price")
+    for idx, item in enumerate(order, start=1):
+        table.add_row(str(idx), item.name or item.item_id, str(item.price or "-"))
+    console.print(table)
+
+
+async def _build_order_items(
+    client: MCPClient, address_id: str, first_item: MenuItem
 ) -> list[MenuItem]:
-    """After the first dish is picked, loop offering more dishes from
-    that SAME restaurant — Swiggy carts can't mix restaurants
-    (cart.add_items() enforces this), so "add another dish" only makes
-    sense scoped to one restaurant's full menu, not the original search
-    results (which span many restaurants). Browses via
-    search.get_restaurant_menu() rather than re-filtering the original
-    search, since you'd often want something the original query didn't
-    match (e.g. searched "shawarma", also want a drink from the same
-    place). Returns the extra items picked (possibly empty) — the
-    caller combines these with the first pick into one add_items() call
-    so quantities/coupons are computed against the whole order, not
-    added piecemeal."""
-    menu = await search.get_restaurant_menu(client, restaurant_id, address_id)
-    if not menu:
-        return []
+    """Interactive cart builder, seeded with the already-picked first
+    dish. Swiggy carts can't mix restaurants (cart.add_items()
+    enforces this), so browsing more options is scoped to that
+    restaurant's full menu, not the original search results (which span
+    many restaurants) — via search.get_restaurant_menu() rather than
+    re-filtering the original search, since you'd often want something
+    the original query didn't match (e.g. searched "shawarma", also
+    want a drink from the same place).
 
-    picked: list[MenuItem] = []
-    picked_ids: set[str] = set()
+    Both the menu and the running order are shown RESULTS_PAGE_SIZE at
+    a time — showing everything at once (a full 30-40 item menu) was
+    flagged directly as overwhelming. 'r<#>' removes an item from the
+    order (including the first pick) before anything is ever sent to
+    the real cart — there was no way to undo a pick at all before this.
+    Returns the final list, possibly empty if everything got removed;
+    the caller treats an empty result as a full cancellation, same as
+    _select_item's 'q'."""
+    order: list[MenuItem] = [first_item]
+    restaurant_id = first_item.restaurant_id
+    restaurant_name = first_item.restaurant_name or "this restaurant"
+    menu: list[MenuItem] = []
+    if restaurant_id:
+        menu = await search.get_restaurant_menu(client, restaurant_id, address_id)
+
+    shown = min(RESULTS_PAGE_SIZE, len(menu))
     while True:
-        table = Table(title=f"{restaurant_name} — add another dish?")
-        table.add_column("#")
-        table.add_column("Item")
-        table.add_column("Base price")
-        table.add_column("Veg")
-        for idx, item in enumerate(menu, start=1):
-            marker = " (added)" if item.item_id in picked_ids else ""
-            table.add_row(
-                str(idx),
-                (item.name or item.item_id) + marker,
-                str(item.price) if item.price is not None else "-",
-                "Veg" if item.veg else ("Non-veg" if item.veg is False else "-"),
-            )
-        console.print(table)
+        _print_order_so_far(order)
+        window = menu[:shown]
+        if window:
+            table = Table(title=f"{restaurant_name} — add another dish?")
+            table.add_column("#")
+            table.add_column("Item")
+            table.add_column("Base price")
+            table.add_column("Veg")
+            order_ids = {i.item_id for i in order}
+            for idx, item in enumerate(window, start=1):
+                marker = " (in order)" if item.item_id in order_ids else ""
+                table.add_row(
+                    str(idx),
+                    (item.name or item.item_id) + marker,
+                    str(item.price) if item.price is not None else "-",
+                    "Veg" if item.veg else ("Non-veg" if item.veg is False else "-"),
+                )
+            console.print(table)
 
-        raw = typer.prompt(f"Add a dish [1-{len(menu)}], or 'done' to continue", default="done")
+        prompt_parts = []
+        if window:
+            prompt_parts.append(f"add a dish [1-{len(window)}]")
+        if shown < len(menu):
+            prompt_parts.append("'m' for more dishes")
+        prompt_parts.append("'r<#>' to remove from your order (e.g. 'r2')")
+        prompt_parts.append("'done' to continue")
+        raw = typer.prompt(", ".join(prompt_parts).capitalize(), default="done")
         choice_raw = raw.strip().lower()
+
         if choice_raw in ("done", "q", ""):
-            return picked
+            return order
+        if choice_raw == "m":
+            if shown < len(menu):
+                shown = min(shown + RESULTS_PAGE_SIZE, len(menu))
+            else:
+                console.print("[yellow]No more dishes.[/]")
+            continue
+        if choice_raw.startswith("r") and choice_raw[1:].isdigit():
+            idx = int(choice_raw[1:])
+            if not (1 <= idx <= len(order)):
+                console.print(f"[red]{idx} is out of range for your order.[/]")
+                continue
+            removed = order.pop(idx - 1)
+            console.print(f"[yellow]Removed {removed.name or removed.item_id}.[/]")
+            continue
 
         try:
             choice = int(raw)
         except ValueError:
             console.print("[red]Not a number — try again.[/]")
             continue
-        if not (1 <= choice <= len(menu)):
+        if not (1 <= choice <= len(window)):
             console.print(f"[red]{choice} is out of range — try again.[/]")
             continue
 
-        item = menu[choice - 1]
-        if item.item_id in picked_ids:
-            console.print(f"[yellow]{item.name or item.item_id} is already added.[/]")
+        item = window[choice - 1]
+        if item.item_id in {i.item_id for i in order}:
+            console.print(f"[yellow]{item.name or item.item_id} is already in your order.[/]")
             continue
-        picked.append(item)
-        picked_ids.add(item.item_id)
+        order.append(item)
         console.print(f"[green]Added {item.name or item.item_id}.[/]")
 
 
@@ -364,12 +428,10 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             console.print("[yellow]Cancelled — nothing added to cart.[/]")
             return
 
-        order_items = [chosen]
-        if chosen.restaurant_id is not None:
-            restaurant_name = chosen.restaurant_name or "this restaurant"
-            order_items += await _select_more_items(
-                client, address_id, chosen.restaurant_id, restaurant_name
-            )
+        order_items = await _build_order_items(client, address_id, chosen)
+        if not order_items:
+            console.print("[yellow]Cancelled — nothing added to cart.[/]")
+            return
         if len(order_items) > 1:
             console.print(f"[cyan]{len(order_items)} items in this order.[/]")
 
