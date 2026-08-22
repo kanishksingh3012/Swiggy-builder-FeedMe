@@ -40,7 +40,9 @@ async def test_build_order_items_picks_two_more_dishes_then_done(monkeypatch):
         return _menu()
 
     monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
-    responses = iter(["1", "2", "done"])
+    # 'a' opens the menu sub-flow (not shown unless asked for), pick 1,
+    # back to the order screen, 'a' again, pick 2, then done.
+    responses = iter(["a", "1", "a", "2", "done"])
     monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
     result = await _build_order_items(None, "addr1", _first())
     assert [i.item_id for i in result] == ["i0", "i1", "i2"]
@@ -51,7 +53,7 @@ async def test_build_order_items_rejects_duplicate_pick(monkeypatch):
         return _menu()
 
     monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
-    responses = iter(["1", "1", "done"])
+    responses = iter(["a", "1", "a", "1", "done"])
     monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
     result = await _build_order_items(None, "addr1", _first())
     assert [i.item_id for i in result] == ["i0", "i1"]
@@ -64,7 +66,7 @@ async def test_build_order_items_can_remove_an_added_dish(monkeypatch):
         return _menu()
 
     monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
-    responses = iter(["1", "r2", "done"])  # add Garlic Naan, then remove it (position 2)
+    responses = iter(["a", "1", "r2", "done"])  # add Garlic Naan, then remove it (position 2)
     monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
     result = await _build_order_items(None, "addr1", _first())
     assert [i.item_id for i in result] == ["i0"]
@@ -101,9 +103,9 @@ async def test_build_order_items_shows_more_dishes_only_five_at_a_time(monkeypat
         return menu
 
     monkeypatch.setattr("feedme.cli.search.get_restaurant_menu", fake_get_restaurant_menu)
-    # first screen only has 5 dishes (m0-m4); picking "6" should fail
-    # until 'm' reveals the rest.
-    responses = iter(["6", "m", "6", "done"])
+    # 'a' opens the menu; first screen only has 5 dishes (m0-m4), so
+    # picking "6" should fail until 'm' reveals the rest.
+    responses = iter(["a", "6", "m", "6", "done"])
     monkeypatch.setattr("feedme.cli.typer.prompt", lambda *a, **k: next(responses))
     result = await _build_order_items(None, "addr1", _first())
     assert [i.item_id for i in result] == ["i0", "m5"]

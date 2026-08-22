@@ -6,7 +6,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 
 import typer
+from rich.align import Align
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
 from feedme import auth, cart, checkout, search, tracking
@@ -24,6 +26,29 @@ from models import Address, Cart, MenuItem, PaymentOption
 app = typer.Typer(name="feedme", help="Zero-phone food ordering from the terminal.")
 
 console = Console()
+
+# Swiggy's actual brand orange — used for every accent/highlight instead
+# of Rich's default cyan, so the CLI reads as "Swiggy" rather than
+# generic terminal-tool blue.
+BRAND = "#fc8019"
+
+
+def _table(title: str) -> Table:
+    """Every table in this CLI uses the same branded styling — one
+    place to keep that consistent rather than repeating it per call
+    site."""
+    return Table(title=title, header_style=f"bold {BRAND}", border_style=BRAND)
+
+
+def _print_banner() -> None:
+    console.print(
+        Panel(
+            Align.center(f"[bold {BRAND}]F E E D M E[/]"),
+            border_style=BRAND,
+            padding=(0, 2),
+        )
+    )
+
 
 # How many search_menu pages (10 items each) 'm' fetches from the server
 # per press. See fetch_more()'s docstring in run_pipeline for why this
@@ -56,7 +81,7 @@ def _print_actions(*actions: tuple[str, str]) -> None:
     -> action legend (choices) -> a short, generic prompt."""
     console.print()
     for key, desc in actions:
-        console.print(f"  [bold cyan]{key:<10}[/][dim]{desc}[/]")
+        console.print(f"  [bold {BRAND}]{key:<10}[/][dim]{desc}[/]")
     console.print()
 
 
@@ -67,7 +92,7 @@ def _print_items_table(items: list[MenuItem]) -> None:
     # _print_cart_summary for the real final numbers). Labeling this
     # "Price" invited exactly the "is this the final price?" question
     # that came up — it isn't, and can't be, until there's a cart.
-    table = Table(title="Results — pick one")
+    table = _table("Results — pick one")
     table.add_column("#")
     table.add_column("Item")
     table.add_column("Restaurant")
@@ -153,13 +178,69 @@ async def _select_item(
 
 
 def _print_order_so_far(order: list[MenuItem]) -> None:
-    table = Table(title="Your order so far")
+    table = _table("Your order so far")
     table.add_column("#")
     table.add_column("Item")
     table.add_column("Base price")
     for idx, item in enumerate(order, start=1):
         table.add_row(str(idx), item.name or item.item_id, str(item.price or "-"))
     console.print(table)
+
+
+def _pick_from_menu(
+    menu: list[MenuItem], restaurant_name: str, order: list[MenuItem]
+) -> MenuItem | None:
+    """Browse-and-pick sub-flow, only ever entered when the user
+    explicitly asks to add a dish (see _build_order_items) — the menu
+    table used to be shown unconditionally on every loop, which was
+    flagged directly as an unwanted extra step for the common case of
+    just wanting one dish. Returns None if the user backs out without
+    picking anything."""
+    order_ids = {i.item_id for i in order}
+    shown = min(RESULTS_PAGE_SIZE, len(menu))
+    while True:
+        window = menu[:shown]
+        table = _table(f"{restaurant_name} menu")
+        table.add_column("#")
+        table.add_column("Item")
+        table.add_column("Base price")
+        table.add_column("Veg")
+        for idx, item in enumerate(window, start=1):
+            marker = " (in order)" if item.item_id in order_ids else ""
+            table.add_row(
+                str(idx),
+                (item.name or item.item_id) + marker,
+                str(item.price) if item.price is not None else "-",
+                "Veg" if item.veg else ("Non-veg" if item.veg is False else "-"),
+            )
+        console.print(table)
+
+        actions = [(f"1-{len(window)}", "add this dish")]
+        if shown < len(menu):
+            actions.append(("m", "show more dishes"))
+        actions.append(("q", "back"))
+        _print_actions(*actions)
+        raw = typer.prompt("Your choice", default="q")
+        choice_raw = raw.strip().lower()
+
+        if choice_raw in ("q", ""):
+            return None
+        if choice_raw == "m":
+            if shown < len(menu):
+                shown = min(shown + RESULTS_PAGE_SIZE, len(menu))
+            else:
+                console.print("[yellow]No more dishes.[/]")
+            continue
+
+        try:
+            choice = int(raw)
+        except ValueError:
+            console.print("[red]Not a number — try again.[/]")
+            continue
+        if not (1 <= choice <= len(window)):
+            console.print(f"[red]{choice} is out of range — try again.[/]")
+            continue
+        return window[choice - 1]
 
 
 async def _build_order_items(
@@ -174,47 +255,24 @@ async def _build_order_items(
     the original query didn't match (e.g. searched "shawarma", also
     want a drink from the same place).
 
-    Both the menu and the running order are shown RESULTS_PAGE_SIZE at
-    a time — showing everything at once (a full 30-40 item menu) was
-    flagged directly as overwhelming. 'r<#>' removes an item from the
-    order (including the first pick) before anything is ever sent to
-    the real cart — there was no way to undo a pick at all before this.
-    Returns the final list, possibly empty if everything got removed;
-    the caller treats an empty result as a full cancellation, same as
+    The default screen here is just "your order so far" plus add/
+    remove/done — the restaurant's full menu (fetched lazily, only on
+    'a') isn't shown unless actively requested, since always showing it
+    was flagged directly as an unwanted extra step for the common case
+    of wanting just one dish. 'r<#>' removes an item from the order
+    (including the first pick) before anything is ever sent to the real
+    cart — there was no way to undo a pick at all before this. Returns
+    the final list, possibly empty if everything got removed; the
+    caller treats an empty result as a full cancellation, same as
     _select_item's 'q'."""
     order: list[MenuItem] = [first_item]
     restaurant_id = first_item.restaurant_id
     restaurant_name = first_item.restaurant_name or "this restaurant"
-    menu: list[MenuItem] = []
-    if restaurant_id:
-        menu = await search.get_restaurant_menu(client, restaurant_id, address_id)
+    menu: list[MenuItem] | None = None
 
-    shown = min(RESULTS_PAGE_SIZE, len(menu))
     while True:
         _print_order_so_far(order)
-        window = menu[:shown]
-        if window:
-            table = Table(title=f"{restaurant_name} — add another dish?")
-            table.add_column("#")
-            table.add_column("Item")
-            table.add_column("Base price")
-            table.add_column("Veg")
-            order_ids = {i.item_id for i in order}
-            for idx, item in enumerate(window, start=1):
-                marker = " (in order)" if item.item_id in order_ids else ""
-                table.add_row(
-                    str(idx),
-                    (item.name or item.item_id) + marker,
-                    str(item.price) if item.price is not None else "-",
-                    "Veg" if item.veg else ("Non-veg" if item.veg is False else "-"),
-                )
-            console.print(table)
-
-        actions = []
-        if window:
-            actions.append((f"1-{len(window)}", "add a dish to your order"))
-        if shown < len(menu):
-            actions.append(("m", "show more dishes"))
+        actions = [("a", "add another dish")]
         if order:
             actions.append(("r<#>", "remove an item, e.g. 'r2'"))
         actions.append(("done", "continue to checkout"))
@@ -224,12 +282,6 @@ async def _build_order_items(
 
         if choice_raw in ("done", "q", ""):
             return order
-        if choice_raw == "m":
-            if shown < len(menu):
-                shown = min(shown + RESULTS_PAGE_SIZE, len(menu))
-            else:
-                console.print("[yellow]No more dishes.[/]")
-            continue
         if choice_raw.startswith("r") and choice_raw[1:].isdigit():
             idx = int(choice_raw[1:])
             if not (1 <= idx <= len(order)):
@@ -238,22 +290,26 @@ async def _build_order_items(
             removed = order.pop(idx - 1)
             console.print(f"[yellow]Removed {removed.name or removed.item_id}.[/]")
             continue
-
-        try:
-            choice = int(raw)
-        except ValueError:
-            console.print("[red]Not a number — try again.[/]")
-            continue
-        if not (1 <= choice <= len(window)):
-            console.print(f"[red]{choice} is out of range — try again.[/]")
+        if choice_raw != "a":
+            console.print("[red]Unrecognized choice — try again.[/]")
             continue
 
-        item = window[choice - 1]
-        if item.item_id in {i.item_id for i in order}:
-            console.print(f"[yellow]{item.name or item.item_id} is already in your order.[/]")
+        if menu is None:
+            menu = []
+            if restaurant_id:
+                menu = await search.get_restaurant_menu(client, restaurant_id, address_id)
+        if not menu:
+            console.print("[yellow]No other dishes available from this restaurant.[/]")
             continue
-        order.append(item)
-        console.print(f"[green]Added {item.name or item.item_id}.[/]")
+
+        picked = _pick_from_menu(menu, restaurant_name, order)
+        if picked is None:
+            continue
+        if picked.item_id in {i.item_id for i in order}:
+            console.print(f"[yellow]{picked.name or picked.item_id} is already in your order.[/]")
+            continue
+        order.append(picked)
+        console.print(f"[green]Added {picked.name or picked.item_id}.[/]")
 
 
 def _print_cart_summary(cart_obj: Cart) -> None:
@@ -269,7 +325,7 @@ def _print_cart_summary(cart_obj: Cart) -> None:
         return
     offers = (cart_obj.data or {}).get("offers") or {}
 
-    table = Table(title="Order summary")
+    table = _table("Order summary")
     table.add_column("")
     table.add_column("", justify="right")
     table.add_row("Item total", f"₹{pricing.get('item_total', '-')}")
@@ -305,14 +361,14 @@ def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None
     if len(options) == 1:
         only = options[0]
         console.print(
-            f"[cyan]Only payment option available: {only.display_name or only.method_id} "
+            f"[{BRAND}]Only payment option available: {only.display_name or only.method_id} "
             "(Mobile, payment confirmation only).[/]"
         )
         _print_actions(("y", "generate the QR and proceed"), ("n", "cancel (default)"))
         raw = typer.prompt("Your choice", default="n")
         return only if raw.strip().lower() in ("y", "yes") else None
 
-    table = Table(title="Payment options — pick one")
+    table = _table("Payment options — pick one")
     table.add_column("#")
     table.add_column("Method")
     table.add_column("Type")
@@ -361,7 +417,7 @@ def _select_address(addresses: list[Address]) -> Address | None:
     the sort already does the real work of surfacing the likely match
     first; this is just a final human check, not another full picker."""
     top = sorted(addresses, key=_address_priority)[:3]
-    table = Table(title="Delivery address — confirm or pick")
+    table = _table("Delivery address — confirm or pick")
     table.add_column("#")
     table.add_column("Tag")
     table.add_column("Category")
@@ -391,6 +447,7 @@ def _select_address(addresses: list[Address]) -> Address | None:
 
 
 async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> None:
+    _print_banner()
     await _ensure_authenticated()
 
     async with MCPClient("food") as client:
@@ -454,7 +511,7 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             console.print("[yellow]Cancelled — nothing added to cart.[/]")
             return
         if len(order_items) > 1:
-            console.print(f"[cyan]{len(order_items)} items in this order.[/]")
+            console.print(f"[{BRAND}]{len(order_items)} items in this order.[/]")
 
         await cart.flush_cart(client, address_id)
         current_cart = await cart.add_items(client, address_id, order_items)
