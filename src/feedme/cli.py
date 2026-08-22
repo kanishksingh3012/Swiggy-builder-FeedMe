@@ -57,6 +57,7 @@ async def _select_item(
     has_more: bool,
     fetch_more: Callable[[], Awaitable[tuple[list[MenuItem], bool]]],
     *,
+    query: str | None = None,
     fastest: bool = False,
 ) -> MenuItem | None:
     """Show the results table with index numbers and require an
@@ -68,7 +69,11 @@ async def _select_item(
     itself returns (MenuItem.rating — confirmed real and genuinely
     different per dish, just not what's displayed here). search_menu is
     paginated (10/page, confirmed live) — 'm' fetches and appends the
-    next page rather than silently hiding the rest of the results."""
+    next page rather than silently hiding the rest of the results.
+    Merged results are re-ranked via search.filter_items(query=...) so
+    an exact name match pulled in by 'm' still surfaces near the top
+    rather than wherever Swiggy's own ranking placed it (confirmed live:
+    a real item ranked 51st for a 2-word query, 1st for its full name)."""
     while True:
         _print_items_table(items)
         prompt = f"Pick an item [1-{len(items)}]"
@@ -85,7 +90,7 @@ async def _select_item(
                 console.print("[yellow]No more results.[/]")
                 continue
             new_items, has_more = await fetch_more()
-            items = search.filter_items(items + new_items, fastest=fastest)
+            items = search.filter_items(items + new_items, query=query, fastest=fastest)
             continue
 
         try:
@@ -292,7 +297,7 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             next_offset = more_next_offset
             return more_items, more_has_more
 
-        chosen = await _select_item(items, has_more, fetch_more, fastest=fastest)
+        chosen = await _select_item(items, has_more, fetch_more, query=query, fastest=fastest)
         if chosen is None:
             console.print("[yellow]Cancelled — nothing added to cart.[/]")
             return

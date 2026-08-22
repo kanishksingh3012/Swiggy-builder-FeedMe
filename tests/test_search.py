@@ -38,6 +38,41 @@ def test_filter_items_combination():
     assert [i.item_id for i in result] == ["a"]
 
 
+def _named(item_id: str, name: str) -> MenuItem:
+    return MenuItem(item_id=item_id, name=name)
+
+
+def test_filter_items_boosts_items_containing_all_query_words():
+    # Confirmed live 2026-08-21: search_menu's own relevance ranking can
+    # bury an exact match deep ("chicken burger" put a real item named
+    # "Chicken Fillet Burger" at rank 51). This is the client-side fix:
+    # boost items whose name contains every query word, any order.
+    items = [
+        _named("a", "Buffalo Wings"),
+        _named("b", "Chicken Fillet Burger"),
+        _named("c", "Veg Burger"),
+    ]
+    result = filter_items(items, query="chicken burger")
+    assert result[0].item_id == "b"
+
+
+def test_filter_items_query_boost_preserves_relative_order_within_groups():
+    items = [
+        _named("a", "Chicken Burger Deluxe"),
+        _named("b", "Veg Wrap"),
+        _named("c", "Chicken Cheese Burger"),
+        _named("d", "Fries"),
+    ]
+    result = filter_items(items, query="chicken burger")
+    assert [i.item_id for i in result] == ["a", "c", "b", "d"]
+
+
+def test_filter_items_no_query_leaves_order_unchanged():
+    items = [_named("a", "Z Item"), _named("b", "A Item")]
+    result = filter_items(items)
+    assert [i.item_id for i in result] == ["a", "b"]
+
+
 async def test_discover_enriches_items_with_restaurant_eta(monkeypatch):
     # search_menu items never carry eta_minutes for real (confirmed
     # live) — discover() enriches them from search_restaurants'

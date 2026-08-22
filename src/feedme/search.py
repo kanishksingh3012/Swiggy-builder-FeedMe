@@ -69,22 +69,50 @@ async def get_restaurant_menu(
     return items
 
 
+def _contains_all_tokens(name: str | None, tokens: list[str]) -> bool:
+    if not name:
+        return False
+    lowered = name.lower()
+    return all(token in lowered for token in tokens)
+
+
 def filter_items(
     items: list[MenuItem],
     *,
+    query: str | None = None,
     max_price: float | None = None,
     fastest: bool = False,
     min_protein: float | None = None,
 ) -> list[MenuItem]:
+    """Confirmed live (2026-08-21): search_menu's own relevance ranking
+    can bury an exact match deep — "chicken burger" put a real item
+    literally named "Chicken Fillet Burger" at rank 51 (page 6), while
+    the fuller "chicken fillet burger" put the same item at rank 1. That
+    ranking is entirely server-side and out of feedme's control, but
+    within whatever page(s) actually get fetched, items whose name
+    contains every query word (any order, not required to be adjacent —
+    the actual generalization of the "consecutive words" theory this was
+    built to test) are boosted to the front rather than left wherever
+    Swiggy's own ranking put them relative to non-matching items. This
+    doesn't retrieve items Swiggy never sent — `m` (pagination) still
+    does that part."""
     filtered = items
     if max_price is not None:
         filtered = [i for i in filtered if i.price is None or i.price <= max_price]
     if min_protein is not None:
         filtered = [i for i in filtered if i.protein_g is not None and i.protein_g >= min_protein]
-    if fastest:
-        filtered = sorted(
-            filtered, key=lambda i: i.eta_minutes if i.eta_minutes is not None else float("inf")
-        )
+
+    tokens = [t for t in query.lower().split() if t] if query else []
+
+    def sort_key(item: MenuItem) -> tuple[int, float]:
+        relevance = 0 if (tokens and _contains_all_tokens(item.name, tokens)) else 1
+        if not fastest:
+            return (relevance, 0.0)
+        eta = item.eta_minutes if item.eta_minutes is not None else float("inf")
+        return (relevance, eta)
+
+    if tokens or fastest:
+        filtered = sorted(filtered, key=sort_key)
     return filtered
 
 
@@ -127,5 +155,7 @@ async def discover(
         if item.restaurant_id in rating_by_restaurant:
             item.restaurant_rating = rating_by_restaurant[item.restaurant_id]
 
-    filtered = filter_items(items, max_price=max_price, fastest=fastest, min_protein=min_protein)
+    filtered = filter_items(
+        items, query=query, max_price=max_price, fastest=fastest, min_protein=min_protein
+    )
     return filtered, has_more, next_offset
