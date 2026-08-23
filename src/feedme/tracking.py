@@ -2,12 +2,7 @@
 
 Confirmed live (2026-08-20): both tools take addressId/orderId
 (camelCase), and get_food_orders requires addressId the same way
-get_food_cart does. track_food_order was only testable against an
-already-delivered order (no active order on the account), returning
-{"orders": [], "statusMessage": "No tracking information..."} — so the
-per-order tracking-entry shape for an actually *active* order is still
-unverified. TERMINAL_STATUSES values are an unverified guess pending
-that.
+get_food_cart does.
 """
 
 from __future__ import annotations
@@ -23,49 +18,20 @@ from models import Order, TrackingStatus
 
 TERMINAL_STATUSES = {"DELIVERED", "CANCELLED", "FAILED"}
 
-# UNVERIFIED: real stage/status strings for an active order have never
-# been observed (no in-flight order to test against — see module
-# docstring). This is a best-effort, Swiggy-app-style phrasing map with
-# a humanized fallback for anything unrecognized, so the terminal line
-# degrades gracefully rather than showing a raw enum either way.
-_STAGE_PHRASES: dict[str, str] = {
-    "ORDER_PLACED": "Order placed",
-    "PLACED": "Order placed",
-    "CONFIRMED": "Restaurant confirmed your order",
-    "ACCEPTED": "Restaurant confirmed your order",
-    "PREPARING": "Preparing your food",
-    "FOOD_PREPARING": "Preparing your food",
-    "OUT_FOR_DELIVERY": "Driver is on the way",
-    "DISPATCHED": "Driver is on the way",
-    "REACHING_RESTAURANT": "Driver is reaching the restaurant",
-    "ARRIVING_AT_RESTAURANT": "Driver is reaching the restaurant",
-    "REACHED_RESTAURANT": "Driver reached the restaurant",
-    "PICKED_UP": "Driver picked up your order",
-    "NEARBY": "Driver is reaching your location",
-    "REACHING_YOU": "Driver is reaching your location",
-    "DELIVERED": "Delivered",
-    "CANCELLED": "Order cancelled",
-    "FAILED": "Order failed",
-}
-
-
-def _friendly_stage(raw: str | None) -> str:
-    if not raw:
-        return "Waiting for an update"
-    key = raw.strip().upper().replace(" ", "_")
-    return _STAGE_PHRASES.get(key, raw.replace("_", " ").strip().capitalize())
-
 
 def _status_line(status: TrackingStatus) -> str:
-    """Single-line, Swiggy-app-style status text, e.g.
-    '12 min left — Driver is reaching the restaurant'."""
-    stage_text = _friendly_stage(status.stage or status.status)
-    if status.eta_minutes is not None:
-        eta = int(status.eta_minutes)
-        return f"{eta} min left — {stage_text}"
+    """Single-line status text. Confirmed live 2026-08-23: `title` is
+    already Swiggy's own human-readable text ("Preparing your order"),
+    and `etaText` is pre-formatted ("29 mins") — no stage-to-phrase
+    mapping needed, unlike the original unverified guess this
+    replaces."""
+    if status.title:
+        if status.eta_text:
+            return f"{status.title} — {status.eta_text} left"
+        return status.title
     if status.status_message:
         return status.status_message
-    return stage_text
+    return "Waiting for an update"
 
 
 async def get_delivery_status(client: MCPClient, order_id: str) -> TrackingStatus:
@@ -74,7 +40,9 @@ async def get_delivery_status(client: MCPClient, order_id: str) -> TrackingStatu
     orders = content.get("orders", [])
     if orders:
         return TrackingStatus.model_validate({"order_id": order_id, **orders[0]})
-    return TrackingStatus(order_id=order_id, status_message=content.get("statusMessage"))
+    return TrackingStatus.model_validate(
+        {"order_id": order_id, "status_message": content.get("statusMessage")}
+    )
 
 
 async def get_order_details_text(client: MCPClient, order_id: str) -> str:
@@ -99,9 +67,36 @@ async def list_orders(client: MCPClient, address_id: str) -> list[Order]:
     return [Order.model_validate(o) for o in orders]
 
 
-def _is_terminal(status: TrackingStatus) -> bool:
-    value = (status.status or status.stage or "").upper()
-    return value in TERMINAL_STATUSES
+def _is_active(status: TrackingStatus) -> bool:
+    """Confirmed live 2026-08-23: track_food_order stops returning an
+    entry at all once an order concludes — there's no terminal status
+    value to look for inside one. Absence of both `title` and `status`
+    is that "no entry" case. `status` is still checked defensively in
+    case a terminal value (delivered/cancelled/failed) is ever seen on
+    a final entry rather than the entry just disappearing."""
+    if status.title is None and status.status is None:
+        return False
+    return (status.status or "").upper() not in TERMINAL_STATUSES
+
+
+async def _final_status(
+    client: MCPClient, address_id: str, order_id: str, fallback: TrackingStatus
+) -> TrackingStatus:
+    """track_food_order goes empty once an order concludes, with no
+    final status value of its own — get_food_orders is the only place
+    that still reports it (confirmed live 2026-08-23: its `status`
+    field reads "Delivered" for a finished order, same field/alias as
+    TrackingStatus.status)."""
+    for order in await list_orders(client, address_id):
+        if order.order_id == order_id:
+            return TrackingStatus.model_validate(
+                {
+                    "order_id": order_id,
+                    "status": order.status,
+                    "status_message": fallback.status_message,
+                }
+            )
+    return fallback
 
 
 TRACK_ORDER_DEFAULT_TIMEOUT = 1800.0
@@ -109,7 +104,7 @@ TRACK_ORDER_DEFAULT_TIMEOUT = 1800.0
 
 def _final_message(status: TrackingStatus, *, timed_out: bool) -> tuple[str, str]:
     """(message, rich style) for the line printed once tracking stops."""
-    value = (status.status or status.stage or "").upper()
+    value = (status.status or "").upper()
     if value == "DELIVERED":
         return "✅ Order delivered!", "bold green"
     if value == "CANCELLED":
@@ -129,6 +124,7 @@ def _final_message(status: TrackingStatus, *, timed_out: bool) -> tuple[str, str
 async def track_order(
     client: MCPClient,
     order_id: str,
+    address_id: str,
     *,
     poll_interval: float = 5.0,
     timeout: float = TRACK_ORDER_DEFAULT_TIMEOUT,
@@ -144,7 +140,7 @@ async def track_order(
             status = await get_delivery_status(client, order_id)
             if status_widget is not None:
                 status_widget.update(_status_line(status))
-            if _is_terminal(status):
+            if not _is_active(status):
                 break
             if time.monotonic() >= deadline:
                 timed_out = True
@@ -153,6 +149,12 @@ async def track_order(
     finally:
         if status_widget is not None:
             status_widget.stop()
+
+    # track_food_order's own entry disappearing (no title/status at
+    # all) carries no final status by itself — look it up via
+    # get_food_orders rather than reporting a blank outcome.
+    if not timed_out and status.title is None and status.status is None:
+        status = await _final_status(client, address_id, order_id, fallback=status)
 
     if render:
         message, style = _final_message(status, timed_out=timed_out)

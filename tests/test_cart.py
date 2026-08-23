@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from feedme.cart import add_items, apply_best_coupon, best_coupon
+from feedme.cart import (
+    CartUpdateFailed,
+    MandatoryAddonRequired,
+    add_items,
+    apply_best_coupon,
+    best_coupon,
+)
 from feedme.mcp_client import MCPToolError
 from models import Cart, Coupon, MenuItem
 
@@ -166,3 +172,98 @@ async def test_add_items_rejects_mixed_restaurants():
     ]
     with pytest.raises(ValueError, match="multiple restaurants"):
         await add_items(client, "addr1", items)
+
+
+class _InvalidAddonClient:
+    """Confirmed live 2026-08-21: adding "Classic Chicken Roll" got
+    update_food_cart to return successful: false with errorCodes
+    ["INVALID_ADDON"] instead of raising or returning an HTTP error — a
+    200 JSON-RPC response that looks superficially fine unless the
+    successful field is actually checked."""
+
+    async def call_tool(self, tool_name, **kwargs):
+        assert tool_name == "update_food_cart"
+        return {
+            "structuredContent": {
+                "successful": False,
+                "titleMessage": "Please select required options",
+                "errorCodes": ["INVALID_ADDON"],
+            }
+        }
+
+
+async def test_add_items_raises_on_unsuccessful_update():
+    client = _InvalidAddonClient()
+    item = MenuItem(item_id="i1", restaurant_id="r1")
+    with pytest.raises(CartUpdateFailed) as excinfo:
+        await add_items(client, "addr1", [item])
+    assert excinfo.value.error_codes == ["INVALID_ADDON"]
+    assert "required options" in str(excinfo.value)
+
+
+class _MandatoryAddonClient:
+    """Confirmed live 2026-08-23: some restaurants' items report the
+    cart update as successful (or omit `successful` entirely) while
+    still echoing a mandatory addon group (minAddons=1) under
+    items[].valid_addons — e.g. Rolls Mania's "Base" choice. The add
+    nominally goes through without the required choice ever being
+    captured, which is exactly as unsafe to proceed on as an outright
+    rejection."""
+
+    async def call_tool(self, tool_name, **kwargs):
+        assert tool_name == "update_food_cart"
+        return {
+            "structuredContent": {
+                "statusCode": 0,
+                "statusMessage": "CART_UPDATED_SUCCESSFULLY",
+                "data": {
+                    "items": [
+                        {
+                            "menu_item_id": 170952729,
+                            "name": "Aloo Fry Roll",
+                            "valid_addons": [
+                                {
+                                    "group_id": 311074758,
+                                    "group_name": "Base",
+                                    "minAddons": 1,
+                                    "maxAddons": 1,
+                                    "choices": [
+                                        {"id": 32856461, "name": "Maida Base", "price": 0},
+                                        {"id": 32856462, "name": "Wheat Base", "price": 1500},
+                                    ],
+                                },
+                                {
+                                    "group_id": 311074759,
+                                    "group_name": "Upgrade your Roll",
+                                    "minAddons": 0,
+                                    "maxAddons": 3,
+                                    "choices": [
+                                        {
+                                            "id": 32856463,
+                                            "name": "Single Egg Omelette",
+                                            "price": 2000,
+                                        }
+                                    ],
+                                },
+                            ],
+                        }
+                    ]
+                },
+            }
+        }
+
+
+async def test_add_items_raises_mandatory_addon_required_even_when_response_succeeds():
+    client = _MandatoryAddonClient()
+    item = MenuItem(item_id="170952729", restaurant_id="492395")
+    with pytest.raises(MandatoryAddonRequired) as excinfo:
+        await add_items(client, "addr1", [item])
+    assert excinfo.value.item_name == "Aloo Fry Roll"
+    # Only the mandatory (minAddons>=1) group surfaces — the optional
+    # "Upgrade your Roll" upsell group is not something feedme should
+    # ever block on.
+    assert [g.group_name for g in excinfo.value.groups] == ["Base"]
+    base = excinfo.value.groups[0]
+    assert [c.name for c in base.choices] == ["Maida Base", "Wheat Base"]
+    # price is paise on the wire (confirmed live) — 1500 paise is +₹15.
+    assert base.choices[1].price == 15

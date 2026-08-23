@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class Credentials(BaseModel):
@@ -96,6 +96,61 @@ class MenuItem(BaseModel):
     veg: bool | None = Field(default=None, alias="isVeg")
     is_bestseller: bool | None = Field(default=None, alias="isBestseller")
     raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class AddonChoice(BaseModel):
+    """One selectable option within an AddonGroup. Confirmed live
+    2026-08-23: `price` is in paise (hundredths of a rupee) — a real
+    "Wheat Base" choice priced at 1500 is +₹15, not +₹1500 — so `price`
+    below is the converted rupee value, with the raw paise figure kept
+    in `raw`."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    id: str
+    name: str | None = None
+    price_paise: float = Field(default=0, alias="price")
+    in_stock: bool | None = Field(default=None, alias="inStock")
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _stringify_id(cls, value: object) -> object:
+        # Confirmed live: group/choice ids come back as bare JSON
+        # integers (e.g. 32856461), unlike menu item ids which are
+        # already strings.
+        return str(value) if value is not None else value
+
+    @property
+    def price(self) -> float:
+        return self.price_paise / 100
+
+
+class AddonGroup(BaseModel):
+    """A group of choices for one menu item, as echoed back in
+    update_food_cart's response under items[].valid_addons (confirmed
+    live 2026-08-23 — not present in get_restaurant_menu's raw item
+    listing, only discoverable via an actual cart-update call). A group
+    with min_addons >= 1 is a *mandatory* choice — the item can't be
+    correctly ordered without picking one, which is exactly the
+    "Classic Chicken Roll" failure this models."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    group_id: str
+    group_name: str | None = None
+    choices: list[AddonChoice] = Field(default_factory=list)
+    min_addons: int = Field(default=0, alias="minAddons")
+    max_addons: int = Field(default=-1, alias="maxAddons")
+
+    @field_validator("group_id", mode="before")
+    @classmethod
+    def _stringify_group_id(cls, value: object) -> object:
+        return str(value) if value is not None else value
+
+    @property
+    def mandatory(self) -> bool:
+        return self.min_addons >= 1
 
 
 class CartLineItem(BaseModel):
@@ -193,17 +248,32 @@ class Order(BaseModel):
 
 
 class TrackingStatus(BaseModel):
-    """track_food_order confirmed live to return {"orders": [...],
-    "statusMessage": ...} — but only for the "nothing to track" case (no
-    active order available to test against). Per-order tracking-entry
-    shape inside `orders` is still unverified."""
+    """Confirmed live 2026-08-23 against a real in-flight order (every
+    prior attempt only had a "nothing to track" empty response to go
+    on) — the per-order entry is nothing like the original
+    stage/eta_minutes guess. Real shape: {orderId, title, subtitle,
+    etaText, orderStatus, progressPercentage, pollingDuration, icon,
+    businessLine}. `title` is already Swiggy's own human-readable text
+    ("Preparing your order") — no stage-name-to-phrase mapping needed
+    anymore. `etaText` is a pre-formatted string ("29 mins"), not a
+    number.
 
-    model_config = ConfigDict(extra="allow")
+    Critically: once an order concludes, track_food_order stops
+    returning an entry for it *at all* — {"orders": [], "statusMessage":
+    "No tracking information found..."}, the exact same shape as "no
+    active order". So there's no terminal status value to look for
+    inside an entry; the entry's disappearance is itself the signal
+    (see tracking._is_active / tracking.track_order, which falls back
+    to get_food_orders for the real final status once that happens)."""
 
-    order_id: str = ""
-    stage: str | None = None
-    status: str | None = None
-    eta_minutes: float | None = None
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    order_id: str = Field(default="", alias="orderId")
+    title: str | None = None
+    subtitle: str | None = None
+    eta_text: str | None = Field(default=None, alias="etaText")
+    status: str | None = Field(default=None, alias="orderStatus")
+    progress_percentage: str | None = Field(default=None, alias="progressPercentage")
     status_message: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 

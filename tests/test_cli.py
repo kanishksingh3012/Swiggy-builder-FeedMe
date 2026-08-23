@@ -86,7 +86,7 @@ def _patch_pipeline(
     )
     monkeypatch.setattr(checkout, "checkout", fake_checkout)
 
-    async def fake_track_order(client, order_id, **kwargs):
+    async def fake_track_order(client, order_id, address_id, **kwargs):
         return TrackingStatus(order_id=order_id, status="DELIVERED")
 
     monkeypatch.setattr(tracking, "track_order", fake_track_order)
@@ -184,3 +184,70 @@ def test_cli_exits_nonzero_when_no_usable_payment_options(monkeypatch):
     result = runner.invoke(cli.app, ["chicken bowl"], input="1\n1\n\n")
     assert result.exit_code == 1
     assert "no usable options" in result.stdout.lower()
+
+
+def test_cli_shows_clear_message_when_item_needs_addon_selection(monkeypatch):
+    # Confirmed live 2026-08-21: "Classic Chicken Roll" needs an
+    # addon/variant pick that feedme has no UI for; add_items() now
+    # raises CartUpdateFailed instead of silently leaving the cart empty
+    # and surfacing a confusing "no payment options" error much later.
+    _patch_pipeline(monkeypatch)
+
+    async def fake_add_items(client, address_id, items):
+        raise cart.CartUpdateFailed("Please select required options", ["INVALID_ADDON"])
+
+    monkeypatch.setattr(cart, "add_items", fake_add_items)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("checkout should not run when the cart update fails")
+
+    monkeypatch.setattr(checkout, "get_available_payment_options", fail_if_called)
+
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n\n")
+    assert result.exit_code == 0
+    assert "couldn't add to cart" in result.stdout.lower()
+    assert "needs an option selected" in result.stdout.lower()
+
+
+def test_cli_shows_mandatory_addon_choices_with_prices(monkeypatch):
+    # Confirmed live 2026-08-23: some items report cart-update success
+    # while still requiring a choice (e.g. Rolls Mania's "Base") — a
+    # different, more informative path than the generic CartUpdateFailed
+    # case above, since here feedme actually knows the choices/prices.
+    _patch_pipeline(monkeypatch)
+
+    from models import AddonChoice, AddonGroup
+
+    async def fake_add_items(client, address_id, items):
+        raise cart.MandatoryAddonRequired(
+            "Aloo Fry Roll",
+            [
+                AddonGroup(
+                    group_id="311074758",
+                    group_name="Base",
+                    min_addons=1,
+                    max_addons=1,
+                    choices=[
+                        AddonChoice(id="32856461", name="Maida Base", price_paise=0),
+                        AddonChoice(id="32856462", name="Wheat Base", price_paise=1500),
+                    ],
+                )
+            ],
+        )
+
+    monkeypatch.setattr(cart, "add_items", fake_add_items)
+
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("checkout should not run when a mandatory choice is unresolved")
+
+    monkeypatch.setattr(checkout, "get_available_payment_options", fail_if_called)
+
+    # address, item, accept order-builder default, then pick "2" (Wheat
+    # Base) at the mandatory-addon prompt.
+    result = runner.invoke(cli.app, ["chicken bowl", "--max-price", "400"], input="1\n1\n\n2\n")
+    assert result.exit_code == 0
+    out = result.stdout.lower()
+    assert "needs a choice" in out
+    assert "wheat base" in out
+    assert "+₹15" in result.stdout
+    assert "can't add this to your cart yet" in out

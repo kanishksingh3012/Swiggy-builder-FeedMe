@@ -25,15 +25,70 @@ rather than the nonexistent discount_value/min_order_value fields.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from feedme.mcp_client import MCPClient, MCPToolError, structured_content
-from models import Cart, Coupon, MenuItem
+from models import AddonGroup, Cart, Coupon, MenuItem
 
 _SAVE_AMOUNT_RE = re.compile(r"(?:save|maximum discount)[:\s]*₹\s*(\d+(?:\.\d+)?)", re.IGNORECASE)
 
 
 async def flush_cart(client: MCPClient, address_id: str) -> None:
     await client.call_tool("flush_food_cart", addressId=address_id)
+
+
+class CartUpdateFailed(Exception):
+    """Raised when update_food_cart reports successful: false. Caught
+    live (2026-08-21): adding "Classic Chicken Roll" failed with
+    errorCodes ["INVALID_ADDON"] — it requires an addon/variant
+    selection (size, spice level, etc.) that feedme has no UI for yet.
+    Before this fix, add_items() ignored the response entirely and
+    called get_cart() regardless, so the cart silently stayed unchanged
+    and the real failure only resurfaced several steps later as a
+    baffling "no payment options available" error — the actual point of
+    failure was here, just never surfaced."""
+
+    def __init__(self, message: str, error_codes: list[str]) -> None:
+        self.error_codes = error_codes
+        super().__init__(message)
+
+
+class MandatoryAddonRequired(Exception):
+    """Raised when a cart item carries at least one addon group with
+    min_addons >= 1 — a required choice (size, base, spice level, etc.)
+    that has to be picked before the item can be correctly ordered.
+
+    Confirmed live (2026-08-23): unlike CartUpdateFailed's INVALID_ADDON
+    case (where update_food_cart rejects outright with no item detail
+    at all), some restaurants' items report `successful` absent/true and
+    still echo their mandatory groups via items[].valid_addons — the
+    add nominally "succeeds" without the required choice actually being
+    captured. Checked before the CartUpdateFailed path so the mandatory
+    groups get surfaced whenever they're available, regardless of the
+    response's own success signal, since a silently-defaulted mandatory
+    choice is exactly as unsafe to proceed on as an outright rejection.
+
+    Submitting a chosen addon back to update_food_cart is a *separate*,
+    still-unsolved problem (live-tested 2026-08-23: 9 different request
+    shapes for the addons field were all rejected identically) — this
+    exception only carries the groups for *display*, not for retrying
+    the add with a selection."""
+
+    def __init__(self, item_name: str, groups: list[AddonGroup]) -> None:
+        self.item_name = item_name
+        self.groups = groups
+        names = ", ".join(g.group_name or g.group_id for g in groups)
+        super().__init__(f"{item_name} requires a choice: {names}")
+
+
+def _mandatory_addons(content: dict[str, Any]) -> tuple[str, list[AddonGroup]] | None:
+    data = content.get("data") or {}
+    for item in data.get("items", []):
+        groups = [AddonGroup.model_validate(g) for g in item.get("valid_addons") or []]
+        mandatory = [g for g in groups if g.mandatory]
+        if mandatory:
+            return item.get("name") or "This item", mandatory
+    return None
 
 
 async def add_items(client: MCPClient, address_id: str, items: list[MenuItem]) -> Cart:
@@ -44,9 +99,18 @@ async def add_items(client: MCPClient, address_id: str, items: list[MenuItem]) -
         )
     restaurant_id = next(iter(restaurant_ids), None)
     cart_items = [{"menu_item_id": i.item_id, "quantity": 1} for i in items]
-    await client.call_tool(
+    result = await client.call_tool(
         "update_food_cart", addressId=address_id, restaurantId=restaurant_id, cartItems=cart_items
     )
+    content = structured_content(result)
+    mandatory = _mandatory_addons(content)
+    if mandatory is not None:
+        item_name, groups = mandatory
+        raise MandatoryAddonRequired(item_name, groups)
+    if content.get("successful") is False:
+        default = "Cart update failed"
+        message = content.get("titleMessage") or content.get("statusMessage") or default
+        raise CartUpdateFailed(message, content.get("errorCodes") or [])
     # update_food_cart's own response has no addressId field either
     # (confirmed live, same gap as apply_food_coupon — see
     # apply_best_coupon's docstring for the real bug this caused). Not

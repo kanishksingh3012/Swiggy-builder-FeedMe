@@ -13,7 +13,7 @@ from rich.table import Table
 
 from feedme import auth, cart, checkout, search, tracking
 from feedme.mcp_client import MCPClient
-from models import Address, Cart, MenuItem, PaymentOption
+from models import AddonGroup, Address, Cart, MenuItem, PaymentOption
 
 # `main` is registered via @app.command() (not @app.callback()): a Typer
 # app whose only entrypoint is a single @app.command() collapses to a
@@ -392,6 +392,47 @@ def _select_payment_option(options: list[PaymentOption]) -> PaymentOption | None
     return options[choice - 1]
 
 
+def _prompt_addon_choice(group: AddonGroup) -> None:
+    """Shows one mandatory group's choices with prices and lets the
+    user pick, purely for their own reference before finishing the
+    order in the Swiggy app — feedme can't submit this selection back
+    to Swiggy itself (see cart.MandatoryAddonRequired's docstring: every
+    request shape tried was rejected identically, live-confirmed
+    2026-08-23 to be a gap in Swiggy's own MCP tools, not a wrong
+    parameter name). Picking here never claims to add anything to the
+    cart — it only echoes the choice back so it's not a "confirm" that
+    silently does nothing."""
+    console.print(f"  [bold {BRAND}]{group.group_name or group.group_id}[/] [dim]— pick one[/]")
+    for idx, choice in enumerate(group.choices, start=1):
+        price = f"+₹{choice.price:.0f}" if choice.price else "+₹0"
+        console.print(f"    [dim]{idx}.[/] {choice.name or choice.id}  [dim]{price}[/]")
+    raw = typer.prompt(
+        f"  Choose {(group.group_name or 'an option').lower()} [1-{len(group.choices)}]",
+        default="1",
+    )
+    try:
+        idx = int(raw)
+    except ValueError:
+        return
+    if 1 <= idx <= len(group.choices):
+        picked = group.choices[idx - 1]
+        console.print(f"  [dim]{picked.name or picked.id} selected.[/]")
+
+
+def _print_mandatory_addon_notice(exc: cart.MandatoryAddonRequired) -> None:
+    console.print(f"[{BRAND}]{exc.item_name}[/] needs a choice before it can be added:\n")
+    for group in exc.groups:
+        _prompt_addon_choice(group)
+    console.print()
+    console.print(
+        "[yellow]Can't add this to your cart yet[/] — Swiggy's ordering tools don't "
+        "currently accept this kind of choice, even after picking one here. This is a "
+        "gap on Swiggy's side, not feedme.\n"
+        "[dim]Order this dish through the Swiggy app instead, or try a dish without a "
+        "required choice.[/]"
+    )
+
+
 def _address_priority(address: Address) -> int:
     """Confirmed live (2026-08-21) that addressCategory=="Home" is not
     unique — an account had 3 addresses categorized "Home" — so category
@@ -514,7 +555,19 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             console.print(f"[{BRAND}]{len(order_items)} items in this order.[/]")
 
         await cart.flush_cart(client, address_id)
-        current_cart = await cart.add_items(client, address_id, order_items)
+        try:
+            current_cart = await cart.add_items(client, address_id, order_items)
+        except cart.MandatoryAddonRequired as exc:
+            _print_mandatory_addon_notice(exc)
+            return
+        except cart.CartUpdateFailed as exc:
+            console.print(f"[red]Couldn't add to cart: {exc}[/]")
+            if "INVALID_ADDON" in exc.error_codes:
+                console.print(
+                    "[yellow]This item needs an option selected (size, spice level, etc.) "
+                    "that feedme can't do yet — try a different item.[/]"
+                )
+            return
         if chosen.restaurant_id is not None:
             current_cart = await cart.apply_best_coupon(client, current_cart, chosen.restaurant_id)
         _print_cart_summary(current_cart)
@@ -531,7 +584,7 @@ async def run_pipeline(query: str, max_price: float | None, fastest: bool) -> No
             return
 
         order = await checkout.checkout(client, current_cart, payment_option)
-        await tracking.track_order(client, order.order_id)
+        await tracking.track_order(client, order.order_id, address_id)
 
 
 @app.command()
